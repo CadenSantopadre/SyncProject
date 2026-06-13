@@ -54,10 +54,6 @@ plt.subplots_adjust(bottom=0.2)  #bottom=0.2 makes room for buttons
 
 plot_is_on = True
 
-# --- 4. Interactive Matplotlib Multi-Button Interface ---
-fig, ax = plt.subplots(figsize=(10, 6))
-plt.subplots_adjust(bottom=0.22) # Safe clearance padding for control buttons
-
 graphs = {
     "Beat-Step": {
         "title": "Viewing Beat-Step Differences",
@@ -122,3 +118,7 @@ btn_phase.on_clicked(show_phase)
 # Initial View Default Configuration
 set_plot("Beat-Step")
 plt.show()
+
+steps_taken = len(df)
+avg_cadence = df["Cadence"].mean()
+avg_rpa = df["Phase_Deg"].mean()
