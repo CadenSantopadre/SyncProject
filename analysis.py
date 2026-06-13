@@ -37,14 +37,20 @@ rpa = 360 * (steps - beats_before) / denom
 
 rpa_norm = ((rpa + 180) % 360) - 180
 
-# --- 3. Merging Phase Angles back to Main Dataframe Structure ---
 phase_mapping_df = pd.DataFrame({
     "Step": steps,
     "Phase_Deg": rpa_norm
 })
 
-# Combine back into the primary dataframe structure
 df = df.merge(phase_mapping_df, on="Step", how="left")
+
+df["Phase_Rad"] = np.deg2rad(df["Phase_Deg"])
+
+df["Phase_Vector"] = np.exp(1j * df["Phase_Rad"])
+
+rolling_mean_vector = df["Phase_Vector"].rolling(window=3).mean()
+
+df["R"] = np.abs(rolling_mean_vector)
 
 print(df)
 
@@ -75,7 +81,15 @@ graphs = {
         "y": df["Phase_Deg"],
         "type": "scatter",
         "color": "crimson"
-    }
+    },
+    "R": {
+    "title": "Phase Locking Value",
+    "ylabel": "R",
+    "y": df["R"],
+    "type": "plot",
+    "color": "darkgreen"
+}
+
 }
 
 def set_plot(graph_name):
@@ -86,34 +100,42 @@ def set_plot(graph_name):
     ax.set_ylabel(graph["ylabel"])
     
     if graph_name == "Phase":
-        ax.set_ylim(-190, 190)  # Standardizes visualization box around the phase span
-        ax.axhline(0, color="gray", linestyle="--", alpha=0.5) # Zero reference line
+        ax.set_ylim(-190, 190)
+        ax.axhline(0, color="gray", linestyle="--", alpha=0.5)
     
+    if graph_name == "R":
+        ax.set_ylim(0,1)
+
     if graph["type"] == "plot":
         ax.plot(df["Step"], graph["y"], color=graph["color"], linewidth=2)
         
     elif graph["type"] == "scatter":
         ax.scatter(df["Step"], graph["y"], color=graph["color"], s=40, alpha=0.85)
         ax.axhline(0, color="gray", linestyle="--", alpha=0.5)
+    
     plt.draw()
 
 # Button action callbacks
 def show_beat_step(event): set_plot("Beat-Step")
 def show_cadence(event): set_plot("Cadence")
 def show_phase(event): set_plot("Phase")
+def show_R(event): set_plot("R")
 
 # Custom UI Button Placement Axes allocations
-ax_beat_btn = plt.axes([0.12, 0.05, 0.23, 0.065])
-ax_cadence_btn = plt.axes([0.38, 0.05, 0.23, 0.065])
-ax_phase_btn = plt.axes([0.64, 0.05, 0.23, 0.065])
+ax_beat_btn = plt.axes([0.01, 0.05, 0.22, 0.065])
+ax_cadence_btn = plt.axes([0.25, 0.05, 0.22, 0.065])
+ax_phase_btn = plt.axes([0.5, 0.05, 0.22, 0.065])
+ax_R_btn = plt.axes([0.75, 0.05, 0.22, 0.065])
 
 btn_beat = Button(ax_beat_btn, 'Show Beat-Step', color='mistyrose', hovercolor='lightcoral')
 btn_cadence = Button(ax_cadence_btn, 'Show Cadence', color='lightcyan', hovercolor='powderblue')
 btn_phase = Button(ax_phase_btn, 'Show Phase Angle', color='lavender', hovercolor='plum')
+btn_R = Button(ax_R_btn, 'Show R', color='lightyellow', hovercolor='yellow')
 
 btn_beat.on_clicked(show_beat_step)
 btn_cadence.on_clicked(show_cadence)
 btn_phase.on_clicked(show_phase)
+btn_R.on_clicked(show_R)
 
 # Initial View Default Configuration
 set_plot("Beat-Step")

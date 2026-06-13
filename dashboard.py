@@ -89,6 +89,14 @@ class MainWindow(QMainWindow):
         })
         self.df = self.df.merge(phase_mapping_df, on="Step", how="left")
 
+        self.df["Phase_Rad"] = np.deg2rad(self.df["Phase_Deg"])
+
+        self.df["Phase_Vector"] = np.exp(1j * self.df["Phase_Rad"])
+
+        rolling_mean_vector = self.df["Phase_Vector"].rolling(window=3).mean()
+
+        self.df["R"] = np.abs(rolling_mean_vector)
+
         self.steps_taken = len(self.df)
         self.avg_cadence = int(self.df["Cadence"].mean())
         self.avg_hr = int(self.df["HR"].mean())
@@ -120,6 +128,13 @@ class MainWindow(QMainWindow):
                 "ylim": (-190, 190),
                 "ref_line": 0
             },
+            "R": {
+                "title": "Phase Locking Value",
+                "ylabel": "R",
+                "y": self.df["R"],
+                "type": "plot",
+                "color": "darkgreen"
+            }
         }
 
     def init_ui(self):
@@ -137,19 +152,19 @@ class MainWindow(QMainWindow):
         btn_beat_step = QPushButton("View Beat-Step") #These are all of our button settings, we'll add more
         btn_cadence = QPushButton("View Cadence")
         btn_phase = QPushButton("View Phase")
-        #TODO: add these buttons, also you need a type configuration in teh dictionary to switch from 3d and stuff
-        #btn_RPA3 = QPushButton("View RPA (3D)")
-        #btn_RPAm = QPushButton("View RPA (Mod)")
+        btn_R = QPushButton("View R")
         
         #When we click, we need to connect to the SLOT in PyQt,
         btn_beat_step.clicked.connect(lambda: self.set_plot("Beat-Step", )) #Using just self.set_plot(...) leads to python needing the function before it's created...?
                                                                           #So we use lambda as something so we can just do whatever we want
         btn_cadence.clicked.connect(lambda: self.set_plot("Cadence"))
         btn_phase.clicked.connect(lambda: self.set_plot("Phase"))
+        btn_R.clicked.connect(lambda: self.set_plot("R"))
         
         left_layout.addWidget(btn_beat_step) #These create hte buttons
         left_layout.addWidget(btn_cadence)
         left_layout.addWidget(btn_phase)
+        left_layout.addWidget(btn_R)
         left_layout.addStretch() #addStretch() makes it so everything is at the top, rather than spaced out and centered
 
         #We do the same thing for Right side, instead making it a big graph with an overview below
@@ -182,7 +197,6 @@ class MainWindow(QMainWindow):
         )
 
         #Because we're using textBrowser, we use html to set up everythnig for the overview
-        #TODO: add a date/time on the run
         self.overview_widget.setHtml(f"""
             <div style="font-family: sans-serif; font-size: 14px; color: #ffffff;">
                 <h3>Run: DATE and TIME</h3>
