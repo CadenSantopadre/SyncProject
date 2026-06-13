@@ -26,38 +26,55 @@ plt.subplots_adjust(bottom=0.2)  #bottom=0.2 makes room for buttons
 
 plot_is_on = True
 
-def set_plot(title_text,y_label,y,type):
+graphs = {
+    "Beat-Step": {
+        "title": "Viewing Beat-Step Differences",
+        "ylabel": "Beat-Step Difference (s)",
+        "y": df["Beat-Step"],
+        "type": "scatter"
+    },
+
+    "Cadence": {
+        "title": "Viewing Cadence",
+        "ylabel": "Cadence (spm)",
+        "y": df["Cadence"],
+        "type": "plot"
+    },
+}
+
+def set_plot(graph_name):
     ax.clear()
-    ax.axhline(0)
-    ax.set_title(title_text)
-    ax.set_xlabel("Time (S)")
-    ax.set_ylabel(y_label)
-    if(type=="plot"):
-        ax.plot(df["Step"],y)
-    if(type=="scatter"):
-        ax.scatter(df["Step"],y)
+
+    graph = graphs[graph_name]
+
+    ax.set_title(graph["title"])
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel(graph["ylabel"])
+
+    if graph["type"] == "plot":
+        ax.plot(df["Step"], graph["y"])
+
+    elif graph["type"] == "scatter":
+        ax.scatter(df["Step"], graph["y"])
+
     plt.draw()
 
-def show_beat_step(event): #matplotlib forces an event when we do button stuff
-    global plot_is_on #MUST do this to change it. Like doing boolean& in cpp
+def show_beat_step(event):
+    set_plot("Beat-Step")
 
-    if plot_is_on:
-        ax.clear()
-        ax.set_title("Plot Turned Off")
-        plt.draw()
-        plot_is_on = False
-    else:
-        set_plot("Viewing Beat-Step Differences", "Beat-Step Difference (s)", df["Beat-Step"], "scatter")
-        plot_is_on = True 
-
+def show_cadence(event):
+    set_plot("Cadence")
 
 # This creates the button below the graph
 ax_beat_btn = plt.axes([0.3, 0.05, 0.18, 0.065])
+ax_cadence_btn = plt.axes([0.5, 0.05, 0.18, 0.065])
 
 btn_beat = Button(ax_beat_btn, 'Show Beat-Step', color='lightcoral', hovercolor='red')
+btn_cadence = Button(ax_cadence_btn, 'Show Cadence', color='lightgreen', hovercolor='green')
+
+
 
 btn_beat.on_clicked(show_beat_step)
-
-set_plot("Viewing Beat-Step Differences", "Beat-Step Difference (s)", df["Beat-Step"], "scatter")
+btn_cadence.on_clicked(show_cadence)
 
 plt.show()
