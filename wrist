@@ -1,0 +1,252 @@
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+int menuIndex = 0;
+const int TOTAL_ITEMS = 3; // RUN, MODE, POWER OFF
+const char* modes[] = {"Steady","Sync","Anti"};
+int modeIndex = 0;
+
+bool onRun = false; 
+bool isPaused = false; // Added pause state
+
+// Button Pins
+const int BUTTON_SELECT = 26;
+const int BUTTON_DOWN = 27;
+const int BUTTON_UP = 14;
+
+// Track previous states
+int lastUpState = HIGH;
+int lastDownState = HIGH;
+int lastSelectState = HIGH;
+
+// Press flags
+bool upPressed = false;
+bool downPressed = false;
+bool selectPressed = false;
+
+// Initialize display (128x64, I2C address 0x3C)
+Adafruit_SSD1306 display(128, 64, &Wire, -1);
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(BUTTON_SELECT, INPUT_PULLUP);
+  pinMode(BUTTON_DOWN, INPUT_PULLUP);
+  pinMode(BUTTON_UP, INPUT_PULLUP);
+
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;);
+  }
+
+  // Welcome Screen
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println(F("Sync\nMachine"));
+  display.display();
+  delay(2000); 
+
+  drawMenu();
+}
+
+void loop() {
+  // 1. Check physical hardware state first
+  readButtons();
+
+  // 2. State Machine: Route processing based on active mode
+  if (onRun) {
+    runRunLogic();
+  } else {
+    runMenuLogic();
+  }
+}
+
+// Reads physical pins and sets single-shot "pressed" flags
+void readButtons() {
+  int upState = digitalRead(BUTTON_UP);
+  int downState = digitalRead(BUTTON_DOWN);
+  int selectState = digitalRead(BUTTON_SELECT);
+
+  // Reset flags from previous frame
+  upPressed = false;
+  downPressed = false;
+  selectPressed = false;
+
+  // Edge detection for UP
+  if (upState == LOW && lastUpState == HIGH) {
+    upPressed = true;
+    delay(50); // Simple debounce
+  }
+  lastUpState = upState;
+
+  // Edge detection for DOWN
+  if (downState == LOW && lastDownState == HIGH) {
+    downPressed = true;
+    delay(50);
+  }
+  lastDownState = downState;
+
+  // Edge detection for SELECT
+  if (selectState == LOW && lastSelectState == HIGH) {
+    selectPressed = true;
+    delay(50);
+  }
+  lastSelectState = selectState;
+}
+
+// Handles inputs and displays when browsing the main menu
+void runMenuLogic() {
+  bool menuChanged = false;
+
+  if (upPressed) {
+    menuIndex = (menuIndex - 1 + TOTAL_ITEMS) % TOTAL_ITEMS;
+    menuChanged = true;
+  }
+  if (downPressed) {
+    menuIndex = (menuIndex + 1) % TOTAL_ITEMS;
+    menuChanged = true;
+  }
+  if (selectPressed) {
+    executeSelection(); // executeSelection alters 'onRun'
+    
+    // If we are still in the menu, redraw it
+    if (!onRun) {
+      drawMenu();
+    }
+  } else if (menuChanged) {
+    drawMenu();
+  }
+}
+
+// Continuous non-blocking execution while running
+void runRunLogic() {
+  unsigned long currentMillis = millis();
+  static unsigned long lastMetronomeTick = 0;
+  static unsigned long lastDisplayUpdate = 0;
+  static bool toggleBeat = false; 
+  int cadence = 120;
+
+  if (selectPressed) {
+    isPaused = !isPaused;
+  }
+
+  if (downPressed) {
+    onRun = false;
+    isPaused = false;
+    
+    display.clearDisplay();
+    display.setCursor(0,0);
+    display.setTextSize(2);
+    display.println("EXITED");
+    display.display();
+    
+    delay(1500);
+    drawMenu();
+    return; 
+  }
+
+  // --- 1. METRONOME TICKER (Changes output based on array index) ---
+  if (!isPaused && (currentMillis - lastMetronomeTick >= (60/cadence)*1000)) { 
+    lastMetronomeTick = currentMillis;
+    toggleBeat = !toggleBeat;
+
+    if (modeIndex == 0) {         // STEADY
+      Serial.println("BEEP! (Steady)");
+    } 
+    else if (modeIndex == 1) {    // SYNC
+      if (toggleBeat) Serial.println("HIGH BEEP! (Sync)");
+      else Serial.println("low beep... (Sync)");
+      //TODO: Add connection logic 
+    } 
+    else if (modeIndex == 2) {    // ANTI
+      Serial.println("BEEP-BEEP! (Anti)");
+      //Also same TODO 
+    }
+  }
+
+  // --- 2. DISPLAY LIVE DATA (Changes text dynamically from array) ---
+  if (currentMillis - lastDisplayUpdate >= 200) {
+    lastDisplayUpdate = currentMillis;
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    
+    display.setTextSize(2);
+    if (isPaused) {
+      display.println("PAUSED");
+    } else {
+      display.println("RUNNING..");
+    }
+
+    display.setTextSize(1);
+    display.print("\nMode: ");
+    display.println(modes[modeIndex]); // Dynamic text pull
+    
+    display.println("Target BPM: 120");
+    display.println("Steps: Calculating...");
+    
+    if (isPaused) {
+      display.println("\n[SELECT] to Resume");
+    } else {
+      display.println("\n[SELECT] to Pause");
+    }
+    display.println("Press [DOWN] to Stop");
+    display.display();
+  }
+}
+
+void drawMenu() {
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+
+  for (int i = 0; i < TOTAL_ITEMS; i++) {
+    display.setCursor(20, i * 20);
+    switch (i) {
+      case 0: display.println("RUN"); break;
+      case 1: display.println("MODE"); break;
+      case 2: display.println("POWER OFF"); break;
+    }
+  }
+
+  display.setCursor(0, menuIndex * 20);
+  display.println(">");
+  display.display();
+}
+
+void executeSelection() {
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.setTextSize(2);
+
+  switch(menuIndex) {
+    case 0:
+      onRun = true; 
+      isPaused = false;
+      display.print("STARTING...");
+      display.display();
+      delay(1000); 
+      break;
+    case 1:
+      changeMode();
+      display.println("Changing\nMODE...");
+      display.print("To: ");
+      display.print(modes[modeIndex]);
+      display.display();
+      delay(1500);
+      drawMenu(); // Return to menu after sub-menu
+      break;
+    case 2:
+      display.println("POWERING\nOFF...");
+      display.display();
+      display.ssd1306_command(SSD1306_DISPLAYOFF); 
+      while(1); 
+      break;
+  }
+}
+
+void changeMode() {
+  modeIndex = (modeIndex + 1) % 3;
+}
