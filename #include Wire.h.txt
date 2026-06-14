@@ -1,0 +1,151 @@
+#include <Wire.h> 
+#include <LiquidCrystal_I2C.h> 
+#include <DHT.h> 
+
+int tasks_done = 0; 
+int water_cups = 0; 
+int index = 0; 
+int water_goal = 12; 
+bool LCDon = true; 
+const int max_screens = 3; 
+
+const int select_btn = 2; 
+const int up_btn = 3; 
+const int down_btn = 4; 
+const int config_btn = 5; 
+const int pwr_btn = 6; 
+
+float tempFahrenheit = 0.0; 
+bool onConfig = false; 
+
+int lastPwrButtonState = HIGH;
+
+DHT dht(7, DHT11); 
+LiquidCrystal_I2C lcd(0x27, 16, 2); 
+
+void setup() { 
+  Serial.begin(9600); 
+  dht.begin(); 
+  pinMode(select_btn, INPUT_PULLUP); 
+  pinMode(up_btn, INPUT_PULLUP); 
+  pinMode(down_btn, INPUT_PULLUP); 
+  pinMode(config_btn, INPUT_PULLUP); 
+  pinMode(pwr_btn, INPUT_PULLUP);
+  
+  lcd.init(); 
+  lcd.backlight(); 
+  lcd.setCursor(0, 0); 
+  lcd.print("  Get Excited!"); 
+  updateDisplay(); 
+} 
+
+void loop() { 
+  tempFahrenheit = dht.readTemperature(true); 
+  Serial.println(tempFahrenheit); 
+  
+  int selectButtonState = digitalRead(select_btn); 
+  int upButtonState = digitalRead(up_btn); 
+  int downButtonState = digitalRead(down_btn); 
+  int configButtonState = digitalRead(config_btn); 
+  int pwrButtonState = digitalRead(pwr_btn);
+
+ 
+  if (pwrButtonState == LOW && lastPwrButtonState == HIGH) {
+    LCDon = !LCDon;
+    
+    if (LCDon) {
+      lcd.backlight();
+      lcd.display();
+      updateDisplay(); 
+    } else {
+      lcd.noBacklight();
+      lcd.noDisplay();
+    }
+    delay(200);
+  }
+  lastPwrButtonState = pwrButtonState;
+
+
+  if (!LCDon) {
+    return; 
+  }
+
+
+  if (upButtonState == LOW && !onConfig) { 
+    if (index > 0) { 
+      index--; 
+      updateDisplay(); 
+      delay(200); 
+    } 
+  } 
+  if (downButtonState == LOW && !onConfig) { 
+    if (index < (max_screens-1)) { 
+      index++; 
+      updateDisplay(); 
+      delay(200); 
+    } 
+  } 
+
+
+  if (upButtonState == LOW && onConfig) { 
+    switch(index) { 
+      case 1: water_goal++; break; 
+    } 
+    updateDisplay(); 
+    delay(200); 
+  } 
+  if (downButtonState == LOW && onConfig) { 
+    switch(index) { 
+      case 1: water_goal--; break; 
+    } 
+    updateDisplay(); 
+    delay(200); 
+  } 
+
+
+  if(selectButtonState == LOW) { 
+    switch(index) { 
+      case 0: tasks_done++; break; 
+      case 1: water_cups++; break; 
+    } 
+    updateDisplay(); 
+    delay(200); 
+  } 
+
+
+  if(configButtonState == LOW) { 
+    switch(index) { 
+      case 0: break; 
+      case 1: 
+        onConfig = !onConfig; 
+        break; 
+    } 
+    updateDisplay(); 
+    delay(200); 
+  } 
+} 
+
+void updateDisplay() { 
+  if (!LCDon) return; 
+
+  lcd.setCursor(0, 1); 
+  lcd.print("                ");
+  lcd.setCursor(0,1); 
+  
+  if(!onConfig){ 
+    switch(index) { 
+      case 0: lcd.print("Tasks Done: " + String(tasks_done)); break; 
+      case 1: lcd.print("Water: " + String(water_cups) + "/" + String(water_goal)); break; 
+      case 2: lcd.print("Temp: " + String(tempFahrenheit)); break; 
+      default: lcd.print("ERROR"); break; 
+    } 
+  } 
+  if(onConfig){ 
+    switch(index) { 
+      case 0: lcd.print("No Config for Tasks"); break; 
+      case 1: lcd.print("Water Goal: " + String(water_goal)); break; 
+      case 2: lcd.print("No Config for Temp"); break; 
+      default: lcd.print("ERROR"); break; 
+    } 
+  } 
+}
