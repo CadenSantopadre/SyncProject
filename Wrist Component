@@ -3,15 +3,14 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include "LittleFS.h"
-#include <esp_now.h> // Added for wireless communication
-#include <WiFi.h>    // Added for wireless communication
+#include <esp_now.h>
+#include <WiFi.h>
 
 int menuIndex = 0;
 const int TOTAL_ITEMS = 3; // RUN, MODE, POWER OFF
 const char* modes[] = {"Steady","Sync","Anti"};
 int modeIndex = 0;
 
-// --- VIBRATION MOTOR VARIABLES ---
 const int motorPin = 25;
 bool isVibrating = false;
 unsigned long motorStartTime = 0;
@@ -19,25 +18,28 @@ unsigned long motorDuration = 100;
 bool onRun = false;
 bool isPaused = false;
 
-// --- SONAR OVER-THE-AIR DATA STORAGE ---
-float lastSonarDistance = 999.0; // Tracks the most recent remote reading
+bool onSteady = true;
 
-// --- ESP-NOW STRUCTURE ---
-// Layout must perfectly mirror what ESP #2 sends
+float accel = 0.0; //Updated accel
+const float accel_thres = 5.0; //MUST be tailored to the runner
+bool previousStepState = false;
+bool step_taken = false;
+unsigned long step1 = 0;
+unsigned long step2 = 0;
+unsigned long step3 = 0;
+int numSteps = 0;
+
 typedef struct struct_message {
-  float distanceCm;
+  float accel; //must match what ESP2 sends
 } struct_message;
 
 struct_message incomingData;
 
-// --- REPAIRED LOGGING CONFIGURATIONS ---
-#define CSV_FILE_PATH "/run_data.csv"
 String ramBuffer = "";
 int eventCounter = 0;
-unsigned long lastLogTime = 0;       // Tracks the 300ms BEAT window
-unsigned long lastStepLogTime = 0;   // Tracks the 450ms STEP window
+unsigned long lastLogTime = 0;       //tracks beat
+unsigned long lastStepLogTime = 0;   //tracks step
 
-// Button Pins
 const int BUTTON_SELECT = 26;
 const int BUTTON_DOWN = 27;
 const int BUTTON_UP = 14;
@@ -56,10 +58,23 @@ bool selectPressed = false;
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 
 // --- ESP-NOW INTERRUPT CALLBACK ---
-// Triggers instantly over-the-air whenever ESP #2 drops data packets
+// Triggers instantly over-the-air whenever ESP #2 sends a new sonar reading
 void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDataRaw, int len) {
   memcpy(&incomingData, incomingDataRaw, sizeof(incomingData));
-  lastSonarDistance = incomingData.distanceCm; // Update global value
+  accel = incomingData.accel;
+
+  bool currentStepState = (accel > 0 && accel < accel_thres);
+
+  Serial.print("accel (gx) = ");
+  Serial.print(accel);
+
+  if (currentStepState && !previousStepState) {
+    step_taken = true;
+    Serial.println("  <-- STEP");
+  } else {
+    Serial.println();
+  }
+  previousStepState = currentStepState;
 }
 
 void setup() {
@@ -160,7 +175,13 @@ void runRunLogic() {
   static unsigned long lastMetronomeTick = 0;
   static unsigned long lastDisplayUpdate = 0;
   static bool toggleBeat = false;
-  int cadence = 175;
+  float cadence = 175.0;
+  if(!onSteady && numSteps == 3){
+
+    float avgPeriod = (step3-step1)/2.0;
+
+    cadence = 60000.0/avgPeriod;
+  }
 
   if (selectPressed) {
     isPaused = !isPaused;
@@ -216,13 +237,22 @@ void runRunLogic() {
     eventCounter++;
   }
 
-  // --- 1b. STEP LOGGING STREAM WITH SONAR THRESHOLD CONDITIONAL ---
-  // Evaluates every 450ms, but appends data ONLY if sonar reading is less than 10cm
-  if (!isPaused && (currentMillis - lastStepLogTime >= 450)) {
+  // --- 1b. STEP LOGGING (latched flag set in OnDataRecv) ---
+  // Checks every 200ms whether a step edge was detected since the last check.
+  if (!isPaused && (currentMillis - lastStepLogTime >= 200)) {
     lastStepLogTime = currentMillis;
-    if (lastSonarDistance < 10.0) {
+    if (step_taken) {
       ramBuffer += String(currentMillis) + ",STEP,1\n";
       eventCounter++;
+      step1 = step2;
+      step2 = step3;
+      step3 = currentMillis;
+
+      if(numSteps < 3){
+          numSteps++;
+      }
+      
+      step_taken = false; // consumed - reset for the next edge
     }
   }
 
@@ -279,19 +309,17 @@ void runRunLogic() {
       display.println("RUNNING..");
     }
     display.setTextSize(1);
-    display.print("\nMode: ");
+    display.print("Mode: ");
     display.println(modes[modeIndex]);
     display.println("Target BPM: 120");
-    
-    // Live feedback on OLED so you see if sonar is updating
-    display.print("Sonar: ");
-    if(lastSonarDistance > 900.0) display.println("No Data");
-    else { display.print(lastSonarDistance, 1); display.println(" cm"); }
+    display.print("Accel: ");
+    display.print(accel, 1);
+    display.println(" (m/s^2)");
 
     if (isPaused) {
-      display.println("\n[SELECT] to Resume");
+      display.println("[SELECT] to Resume");
     } else {
-      display.println("\n[SELECT] to Pause");
+      display.println("[SELECT] to Pause");
     }
     display.println("Press [DOWN] to Stop");
     display.display();
@@ -323,7 +351,8 @@ void executeSelection() {
     case 0:
       onRun = true;
       isPaused = false;
-      lastSonarDistance = 999.0; // Reset tracking state on run start
+      step_taken = false;
+      previousStepState = false;
       LittleFS.remove(CSV_FILE_PATH);
       {
         File file = LittleFS.open(CSV_FILE_PATH, FILE_WRITE);
@@ -356,6 +385,8 @@ void executeSelection() {
 
 void changeMode() {
   modeIndex = (modeIndex + 1) % 3;
+  if(modeIndex == 1 || modeIndex == 2){onSteady=false;}
+  else{onSteady=true;}
 }
 
 void triggerVibration(int strength, unsigned long duration, unsigned long now) {
