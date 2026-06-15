@@ -1,7 +1,7 @@
 import sys
 import numpy as np
 import pandas as pd
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextBrowser)
+from PyQt6.QtWidgets import (QFileDialog, QApplication, QMainWindow, QWidget, QLabel, QSlider, QVBoxLayout, QHBoxLayout, QPushButton, QTextBrowser)
 from PyQt6.QtCore import Qt
 
 # Matplotlib PyQt backend imports
@@ -35,6 +35,10 @@ class MatplotlibWidget(FigureCanvas): #This is how we set up the graph so it can
         self.axes.grid(True)
         self.draw() #Actually draws the thing
 
+    def set_x_limits(self, x_min, x_max):
+        self.axes.set_xlim(x_min, x_max)
+        self.draw()
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__() #Also no clue
@@ -42,7 +46,12 @@ class MainWindow(QMainWindow):
         self.setGeometry(0, 0, 1000, 700) #0,0 on the monitor; then it's x,y is 1000,700
         
         #intake the data and then process it
-        self.process_data()
+        filename, _ = QFileDialog.getOpenFileName(self,"Select Run File","","CSV Files (*.csv)")
+
+        if filename:
+            self.process_data(filename)
+        else:
+            sys.exit()
         
         # initilize the ui, so this will set up the widget format, 
         self.init_ui()
@@ -51,9 +60,9 @@ class MainWindow(QMainWindow):
         self.set_plot("Beat-Step")
         
         #process_data is all from analysis.py
-    def process_data(self):
+    def process_data(self, filename):
         
-        self.df = pd.read_csv("Dummy_Sheet.csv")
+        self.df = pd.read_csv(filename)
         
         self.df["Step_Difference"] = self.df["Step"].diff()
         self.df["Step_Difference"] = self.df["Step_Difference"].fillna(self.df.iloc[0, 0])
@@ -102,7 +111,8 @@ class MainWindow(QMainWindow):
         self.avg_hr = int(self.df["HR"].mean())
         self.avg_rpa = int(self.df["Phase_Deg"].mean())
 
-            
+        self.time_axis = np.arange(len(self.df))
+
         # Define graph configurations
         self.graphs = {
             "Beat-Step": {
@@ -169,32 +179,74 @@ class MainWindow(QMainWindow):
 
         #We do the same thing for Right side, instead making it a big graph with an overview below
         right_layout = QVBoxLayout()
+
+
+        slider_layout = QHBoxLayout()
+
+        self.lbl_min = QLabel("Min: 0")
+        self.sld_min = QSlider(Qt.Orientation.Horizontal)
+        self.sld_min.setRange(0, len(self.time_axis) - 2)
+        self.sld_min.setValue(0)
+        
+        self.lbl_max = QLabel("Max: Max")
+        self.sld_max = QSlider(Qt.Orientation.Horizontal)
+        self.sld_max.setRange(1, len(self.time_axis))
+        self.sld_max.setValue(len(self.time_axis))
+
+        self.sld_min.valueChanged.connect(self.handle_slider_change)
+        self.sld_max.valueChanged.connect(self.handle_slider_change)
+        
+        slider_layout.addWidget(self.lbl_min)
+        slider_layout.addWidget(self.sld_min)
+        slider_layout.addWidget(self.lbl_max)
+        slider_layout.addWidget(self.sld_max)
         
         self.graph_widget = MatplotlibWidget() #This creates our widget as self.graph_widget
         self.overview_widget = QTextBrowser()
         self.overview_widget.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        right_layout.addWidget(self.graph_widget, stretch=7) #Occupies 70%
+        right_layout.addWidget(self.graph_widget, stretch=6) #Occupies 60%
+        right_layout.addLayout(slider_layout, stretch=1) #10%
         right_layout.addWidget(self.overview_widget, stretch=3) #30%
 
 
         main_layout.addLayout(left_layout, stretch=1) #Same deal here
         main_layout.addLayout(right_layout, stretch=9)
 
-    #TODO: Will need Heart Rate
-    def set_plot(self, graph_key):
-        #We need a key(like an address in Cpp?) because this is object-oriented
-        #we need the graph_key because we are looking in our dictionary of graphs(scatter, plot, etc)
+    def handle_slider_change(self):    
+        min_val = self.sld_min.value()
+        max_val = self.sld_max.value()
+        
+        # Guard rail: Stop the minimum slider from crossing past the maximum slider
+        if min_val >= max_val:
+            min_val = max_val - 1
+            self.sld_min.setValue(min_val)
+            
+        # Dynamically change text readouts above sliders
+        self.lbl_min.setText(f"Min: {min_val}s")
+        self.lbl_max.setText(f"Max: {max_val}s")
+        
+        # Apply the new boundaries to the Matplotlib canvas
+        self.graph_widget.set_x_limits(min_val, max_val)
 
+    def set_plot(self, graph_key):
+        """Your updated plotting method."""
+        graph_cfg = self.graphs[graph_key]
+        
+        # Pass your new self.time_axis array into the update call
         self.graph_widget.update_graph(
-            x=self.df["Step"],
-            y=self.graphs[graph_key]["y"],
-            title=self.graphs[graph_key]["title"],
-            ylabel=self.graphs[graph_key]["ylabel"],
-            plot_type=self.graphs[graph_key]["type"],
-            color=self.graphs[graph_key].get("color", "blue"),
-            ylim=self.graphs[graph_key].get("ylim"),
-            ref_line=self.graphs[graph_key].get("ref_line")
+            x=self.time_axis, 
+            y=graph_cfg["y"], 
+            title=graph_cfg["title"], 
+            ylabel=graph_cfg["ylabel"], 
+            plot_type=graph_cfg["type"], 
+            color=graph_cfg["color"], 
+            ylim=graph_cfg.get("ylim", None), 
+            ref_line=graph_cfg.get("ref_line", None)
         )
+        
+        # Enforce current slider settings onto the newly loaded graph
+        self.handle_slider_change()
+
 
         #Because we're using textBrowser, we use html to set up everythnig for the overview
         self.overview_widget.setHtml(f"""
