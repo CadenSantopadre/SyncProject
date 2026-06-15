@@ -8,14 +8,12 @@ const int LED_PIN = 2;
 const int trigPin = 13;
 const int echoPin = 12;
 
-bool previousStepState = false;
-
 // TODO: REPLACE THESE HEX VALUES WITH YOUR ESP #1 REAL MAC ADDRESS
 uint8_t receiverAddress[] = {0x5C, 0x01, 0x3B, 0xBF, 0x3A, 0x4C}; 
 
 // Data packet structure. Matches ESP #1 layout perfectly.
 typedef struct struct_message {
-  bool step_taken;
+  float dist_cm;
 } struct_message;
 
 struct_message myData;
@@ -78,18 +76,8 @@ void loop() {
   long duration = pulseIn(echoPin, HIGH);
   
   // 3. Compute the structural distance value in cm
-  float distanceCm = duration * 0.034 / 2;
-  
-  bool currentStepState = (distanceCm < 10);
+  myData.dist_cm = duration * 0.034 / 2;
 
-  if (currentStepState && !previousStepState) {
-      myData.step_taken = true;      // only send one pulse
-  }
-  else {
-      myData.step_taken = false;
-  }
-
-  previousStepState = currentStepState;
 
   // 4. Beam the data structure over-the-air to ESP #1
   esp_err_t result = esp_now_send(receiverAddress, (uint8_t *) &myData, sizeof(myData));
