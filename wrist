@@ -2,7 +2,9 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include "LittleFS.h" 
+#include "LittleFS.h"
+#include <esp_now.h> // Added for wireless communication
+#include <WiFi.h>    // Added for wireless communication
 
 int menuIndex = 0;
 const int TOTAL_ITEMS = 3; // RUN, MODE, POWER OFF
@@ -17,12 +19,23 @@ unsigned long motorDuration = 100;
 bool onRun = false;
 bool isPaused = false;
 
-// --- REPAIRED LOGGING CONFIGURATIONS (No Heart Rate) ---
+// --- SONAR OVER-THE-AIR DATA STORAGE ---
+float lastSonarDistance = 999.0; // Tracks the most recent remote reading
+
+// --- ESP-NOW STRUCTURE ---
+// Layout must perfectly mirror what ESP #2 sends
+typedef struct struct_message {
+  float distanceCm;
+} struct_message;
+
+struct_message incomingData;
+
+// --- REPAIRED LOGGING CONFIGURATIONS ---
 #define CSV_FILE_PATH "/run_data.csv"
-String ramBuffer = "";       
-int eventCounter = 0;        
-unsigned long lastLogTime = 0;     // Tracks the 300ms BEAT window
-unsigned long lastStepLogTime = 0; // Tracks the 450ms STEP window
+String ramBuffer = "";
+int eventCounter = 0;
+unsigned long lastLogTime = 0;       // Tracks the 300ms BEAT window
+unsigned long lastStepLogTime = 0;   // Tracks the 450ms STEP window
 
 // Button Pins
 const int BUTTON_SELECT = 26;
@@ -42,6 +55,13 @@ bool selectPressed = false;
 // Initialize display (128x64, I2C address 0x3C)
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 
+// --- ESP-NOW INTERRUPT CALLBACK ---
+// Triggers instantly over-the-air whenever ESP #2 drops data packets
+void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDataRaw, int len) {
+  memcpy(&incomingData, incomingDataRaw, sizeof(incomingData));
+  lastSonarDistance = incomingData.distanceCm; // Update global value
+}
+
 void setup() {
   Serial.begin(115200);
   pinMode(BUTTON_SELECT, INPUT_PULLUP);
@@ -49,11 +69,19 @@ void setup() {
   pinMode(BUTTON_UP, INPUT_PULLUP);
   pinMode(motorPin, OUTPUT);
 
+  // Initialize Wireless Stack for ESP-NOW (Required)
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println(F("Error initializing ESP-NOW"));
+  } else {
+    esp_now_register_recv_cb(OnDataRecv);
+  }
+
   // Initialize LittleFS Internal Flash Partition
   if (!LittleFS.begin(true)) {
     Serial.println(F("LittleFS Storage partition initialization failed"));
   }
-
+  
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println(F("SSD1306 allocation failed"));
     for(;;);
@@ -132,7 +160,7 @@ void runRunLogic() {
   static unsigned long lastMetronomeTick = 0;
   static unsigned long lastDisplayUpdate = 0;
   static bool toggleBeat = false;
-  int cadence = 120;
+  int cadence = 175;
 
   if (selectPressed) {
     isPaused = !isPaused;
@@ -147,10 +175,14 @@ void runRunLogic() {
     // 1. Flush any leftover lines in RAM to the physical flash before dumping
     if (ramBuffer.length() > 0) {
       File logFile = LittleFS.open(CSV_FILE_PATH, FILE_APPEND);
-      if (logFile) { logFile.print(ramBuffer); logFile.close(); }
-      ramBuffer = ""; eventCounter = 0;
+      if (logFile) {
+        logFile.print(ramBuffer);
+        logFile.close();
+      }
+      ramBuffer = "";
+      eventCounter = 0;
     }
-
+    
     display.clearDisplay();
     display.setCursor(0,0);
     display.setTextSize(2);
@@ -166,14 +198,12 @@ void runRunLogic() {
       }
       readFile.close();
       Serial.println("--- END OF RUN CSV ---");
-      
       // Wipe internal log to leave memory fresh for your next workout
       LittleFS.remove(CSV_FILE_PATH);
       Serial.println("[INFO] Storage wiped and re-centered.");
     } else {
       Serial.println("No data logs found.");
     }
-
     delay(1500);
     drawMenu();
     return;
@@ -182,15 +212,18 @@ void runRunLogic() {
   // --- 1a. BEAT LOGGING STREAM (Every 300ms) ---
   if (!isPaused && (currentMillis - lastLogTime >= 300)) {
     lastLogTime = currentMillis;
-    ramBuffer += String(currentMillis) + ",BEAT,1\n"; // Removed HR variable dependency
+    ramBuffer += String(currentMillis) + ",BEAT,1\n"; 
     eventCounter++;
   }
 
-  // --- 1b. STEP LOGGING STREAM (Every 450ms Cadence) ---
+  // --- 1b. STEP LOGGING STREAM WITH SONAR THRESHOLD CONDITIONAL ---
+  // Evaluates every 450ms, but appends data ONLY if sonar reading is less than 10cm
   if (!isPaused && (currentMillis - lastStepLogTime >= 450)) {
     lastStepLogTime = currentMillis;
-    ramBuffer += String(currentMillis) + ",STEP,1\n"; 
-    eventCounter++;
+    if (lastSonarDistance < 10.0) {
+      ramBuffer += String(currentMillis) + ",STEP,1\n";
+      eventCounter++;
+    }
   }
 
   // --- BATCH SAVE ACTIONS ---
@@ -200,19 +233,20 @@ void runRunLogic() {
       logFile.print(ramBuffer);
       logFile.close();
     }
-    ramBuffer = "";  
-    eventCounter = 0; 
+    ramBuffer = "";
+    eventCounter = 0;
   }
 
   // --- 2. METRONOME MOTOR TICKER ---
-  if (!isPaused && (currentMillis - lastMetronomeTick >= (60.0 / cadence) * 1000)) {
+  if (!isPaused && (currentMillis - lastMetronomeTick >= (120.0 / cadence) * 1000)) {
     lastMetronomeTick = currentMillis;
     toggleBeat = !toggleBeat;
 
     if (modeIndex == 0) { // STEADY
       Serial.println("BEEP! (Steady)");
       triggerVibration(255, 150, currentMillis);
-    } else if (modeIndex == 1) { // SYNC
+    } 
+    else if (modeIndex == 1) { // SYNC
       if (toggleBeat) {
         Serial.println("HIGH BEEP! (Sync)");
         triggerVibration(255, 150, currentMillis);
@@ -220,7 +254,8 @@ void runRunLogic() {
         Serial.println("low beep... (Sync)");
         triggerVibration(120, 150, currentMillis);
       }
-    } else if (modeIndex == 2) { // ANTI
+    } 
+    else if (modeIndex == 2) { // ANTI
       Serial.println("BEEP-BEEP! (Anti)");
       triggerVibration(255, 150, currentMillis);
     }
@@ -228,7 +263,7 @@ void runRunLogic() {
 
   // --- 3. MOTOR TIMER SHUTOFF ---
   if (isVibrating && (currentMillis - motorStartTime >= motorDuration)) {
-    analogWrite(motorPin, 0); 
+    analogWrite(motorPin, 0);
     isVibrating = false;
   }
 
@@ -247,7 +282,12 @@ void runRunLogic() {
     display.print("\nMode: ");
     display.println(modes[modeIndex]);
     display.println("Target BPM: 120");
-    display.println("Logging: Dual Stream");
+    
+    // Live feedback on OLED so you see if sonar is updating
+    display.print("Sonar: ");
+    if(lastSonarDistance > 900.0) display.println("No Data");
+    else { display.print(lastSonarDistance, 1); display.println(" cm"); }
+
     if (isPaused) {
       display.println("\n[SELECT] to Resume");
     } else {
@@ -283,8 +323,7 @@ void executeSelection() {
     case 0:
       onRun = true;
       isPaused = false;
-      
-      // Wipe old logs and start a clean 3-column data tracking format
+      lastSonarDistance = 999.0; // Reset tracking state on run start
       LittleFS.remove(CSV_FILE_PATH);
       {
         File file = LittleFS.open(CSV_FILE_PATH, FILE_WRITE);
@@ -293,7 +332,6 @@ void executeSelection() {
           file.close();
         }
       }
-
       display.print("STARTING...");
       display.display();
       delay(1000);
@@ -321,7 +359,7 @@ void changeMode() {
 }
 
 void triggerVibration(int strength, unsigned long duration, unsigned long now) {
-  analogWrite(motorPin, strength); 
+  analogWrite(motorPin, strength);
   motorStartTime = now;
   motorDuration = duration;
   isVibrating = true;
