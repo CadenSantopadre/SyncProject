@@ -2,6 +2,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include "LittleFS.h" 
 
 int menuIndex = 0;
 const int TOTAL_ITEMS = 3; // RUN, MODE, POWER OFF
@@ -9,13 +10,19 @@ const char* modes[] = {"Steady","Sync","Anti"};
 int modeIndex = 0;
 
 // --- VIBRATION MOTOR VARIABLES ---
-const int motorPin = 25;               // Change this if your IN wire is not on Pin 25
+const int motorPin = 25;
 bool isVibrating = false;
-unsigned long motorStartTime = 0;      // Changed to unsigned long to prevent overflow
-unsigned long motorDuration = 100;     // Changed to unsigned long
-
+unsigned long motorStartTime = 0;
+unsigned long motorDuration = 100;
 bool onRun = false;
-bool isPaused = false; 
+bool isPaused = false;
+
+// --- REPAIRED LOGGING CONFIGURATIONS (No Heart Rate) ---
+#define CSV_FILE_PATH "/run_data.csv"
+String ramBuffer = "";       
+int eventCounter = 0;        
+unsigned long lastLogTime = 0;     // Tracks the 300ms BEAT window
+unsigned long lastStepLogTime = 0; // Tracks the 450ms STEP window
 
 // Button Pins
 const int BUTTON_SELECT = 26;
@@ -40,9 +47,12 @@ void setup() {
   pinMode(BUTTON_SELECT, INPUT_PULLUP);
   pinMode(BUTTON_DOWN, INPUT_PULLUP);
   pinMode(BUTTON_UP, INPUT_PULLUP);
-  
-  // Configure the motor pin as a standard output
-  pinMode(motorPin, OUTPUT); 
+  pinMode(motorPin, OUTPUT);
+
+  // Initialize LittleFS Internal Flash Partition
+  if (!LittleFS.begin(true)) {
+    Serial.println(F("LittleFS Storage partition initialization failed"));
+  }
 
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println(F("SSD1306 allocation failed"));
@@ -78,97 +88,174 @@ void readButtons() {
   downPressed = false;
   selectPressed = false;
 
-  if (upState == LOW && lastUpState == HIGH) { upPressed = true; delay(50); }
+  if (upState == LOW && lastUpState == HIGH) {
+    upPressed = true;
+    delay(50);
+  }
   lastUpState = upState;
 
-  if (downState == LOW && lastDownState == HIGH) { downPressed = true; delay(50); }
+  if (downState == LOW && lastDownState == HIGH) {
+    downPressed = true;
+    delay(50);
+  }
   lastDownState = downState;
 
-  if (selectState == LOW && lastSelectState == HIGH) { selectPressed = true; delay(50); }
+  if (selectState == LOW && lastSelectState == HIGH) {
+    selectPressed = true;
+    delay(50);
+  }
   lastSelectState = selectState;
 }
 
 void runMenuLogic() {
   bool menuChanged = false;
-  if (upPressed) { menuIndex = (menuIndex - 1 + TOTAL_ITEMS) % TOTAL_ITEMS; menuChanged = true; }
-  if (downPressed) { menuIndex = (menuIndex + 1) % TOTAL_ITEMS; menuChanged = true; }
+  if (upPressed) {
+    menuIndex = (menuIndex - 1 + TOTAL_ITEMS) % TOTAL_ITEMS;
+    menuChanged = true;
+  }
+  if (downPressed) {
+    menuIndex = (menuIndex + 1) % TOTAL_ITEMS;
+    menuChanged = true;
+  }
   if (selectPressed) {
     executeSelection();
-    if (!onRun) { drawMenu(); }
+    if (!onRun) {
+      drawMenu();
+    }
   } else if (menuChanged) {
     drawMenu();
   }
 }
 
 void runRunLogic() {
-  unsigned long currentMillis = millis(); 
-  static unsigned long lastMetronomeTick = 0; 
-  static unsigned long lastDisplayUpdate = 0; 
-  static bool toggleBeat = false; 
-  int cadence = 120; 
+  unsigned long currentMillis = millis();
+  static unsigned long lastMetronomeTick = 0;
+  static unsigned long lastDisplayUpdate = 0;
+  static bool toggleBeat = false;
+  int cadence = 120;
 
-  if (selectPressed) { isPaused = !isPaused; } 
+  if (selectPressed) {
+    isPaused = !isPaused;
+  }
 
-  if (downPressed) { 
-    onRun = false; 
-    isPaused = false; 
-    display.clearDisplay(); 
-    display.setCursor(0,0); 
-    display.setTextSize(2); 
-    display.println("EXITED"); 
-    display.display(); 
-    delay(1500); 
-    drawMenu(); 
-    return; 
-  } 
+  // --- EXIT AND EXTRACT DATA VIA USB ---
+  if (downPressed) {
+    analogWrite(motorPin, 0); // Stops motor from staying stuck on exit
+    onRun = false;
+    isPaused = false;
+    
+    // 1. Flush any leftover lines in RAM to the physical flash before dumping
+    if (ramBuffer.length() > 0) {
+      File logFile = LittleFS.open(CSV_FILE_PATH, FILE_APPEND);
+      if (logFile) { logFile.print(ramBuffer); logFile.close(); }
+      ramBuffer = ""; eventCounter = 0;
+    }
 
-  // --- 1. METRONOME TICKER --- 
-  if (!isPaused && (currentMillis - lastMetronomeTick >= (60.0 / cadence) * 1000)) { 
-    lastMetronomeTick = currentMillis; 
-    toggleBeat = !toggleBeat; 
+    display.clearDisplay();
+    display.setCursor(0,0);
+    display.setTextSize(2);
+    display.println("DUMPING\nDATA...");
+    display.display();
 
-    if (modeIndex == 0) { // STEADY 
-      Serial.println("BEEP! (Steady)"); 
-      triggerVibration(255, 150, currentMillis); 
-    } 
-    else if (modeIndex == 1) { // SYNC 
-      if (toggleBeat) {
-        Serial.println("HIGH BEEP! (Sync)"); 
-        triggerVibration(255, 150, currentMillis); 
-      } 
-      else {
-        Serial.println("low beep... (Sync)"); 
-        triggerVibration(120, 150, currentMillis); 
+    // 2. Dump the accumulated data history via USB serial line
+    Serial.println("\n--- START OF RUN CSV ---");
+    File readFile = LittleFS.open(CSV_FILE_PATH, FILE_READ);
+    if (readFile) {
+      while (readFile.available()) {
+        Serial.write(readFile.read());
       }
-    } 
-    else if (modeIndex == 2) { // ANTI 
-      Serial.println("BEEP-BEEP! (Anti)"); 
-      triggerVibration(255, 150, currentMillis); 
-    } 
-  } 
+      readFile.close();
+      Serial.println("--- END OF RUN CSV ---");
+      
+      // Wipe internal log to leave memory fresh for your next workout
+      LittleFS.remove(CSV_FILE_PATH);
+      Serial.println("[INFO] Storage wiped and re-centered.");
+    } else {
+      Serial.println("No data logs found.");
+    }
 
-  // --- 1b. MOTOR TIMER SHUTOFF ---
-  if (isVibrating && (currentMillis - motorStartTime >= motorDuration)) { 
-    analogWrite(motorPin, 0); // FIXED: Switched to simple, reliable analogWrite
-    isVibrating = false; 
-  } 
+    delay(1500);
+    drawMenu();
+    return;
+  }
 
-  // --- 2. DISPLAY LIVE DATA --- 
-  if (currentMillis - lastDisplayUpdate >= 200) { 
-    lastDisplayUpdate = currentMillis; 
-    display.clearDisplay(); 
-    display.setCursor(0, 0); 
-    display.setTextSize(2); 
-    if (isPaused) { display.println("PAUSED"); } else { display.println("RUNNING.."); } 
-    display.setTextSize(1); 
-    display.print("\nMode: "); 
-    display.println(modes[modeIndex]); 
-    display.println("Target BPM: 120"); 
-    display.println("Steps: Calculating..."); 
-    if (isPaused) { display.println("\n[SELECT] to Resume"); } else { display.println("\n[SELECT] to Pause"); } 
-    display.println("Press [DOWN] to Stop"); 
-    display.display(); 
-  } 
+  // --- 1a. BEAT LOGGING STREAM (Every 300ms) ---
+  if (!isPaused && (currentMillis - lastLogTime >= 300)) {
+    lastLogTime = currentMillis;
+    ramBuffer += String(currentMillis) + ",BEAT,1\n"; // Removed HR variable dependency
+    eventCounter++;
+  }
+
+  // --- 1b. STEP LOGGING STREAM (Every 450ms Cadence) ---
+  if (!isPaused && (currentMillis - lastStepLogTime >= 450)) {
+    lastStepLogTime = currentMillis;
+    ramBuffer += String(currentMillis) + ",STEP,1\n"; 
+    eventCounter++;
+  }
+
+  // --- BATCH SAVE ACTIONS ---
+  if (eventCounter >= 20) {
+    File logFile = LittleFS.open(CSV_FILE_PATH, FILE_APPEND);
+    if (logFile) {
+      logFile.print(ramBuffer);
+      logFile.close();
+    }
+    ramBuffer = "";  
+    eventCounter = 0; 
+  }
+
+  // --- 2. METRONOME MOTOR TICKER ---
+  if (!isPaused && (currentMillis - lastMetronomeTick >= (60.0 / cadence) * 1000)) {
+    lastMetronomeTick = currentMillis;
+    toggleBeat = !toggleBeat;
+
+    if (modeIndex == 0) { // STEADY
+      Serial.println("BEEP! (Steady)");
+      triggerVibration(255, 150, currentMillis);
+    } else if (modeIndex == 1) { // SYNC
+      if (toggleBeat) {
+        Serial.println("HIGH BEEP! (Sync)");
+        triggerVibration(255, 150, currentMillis);
+      } else {
+        Serial.println("low beep... (Sync)");
+        triggerVibration(120, 150, currentMillis);
+      }
+    } else if (modeIndex == 2) { // ANTI
+      Serial.println("BEEP-BEEP! (Anti)");
+      triggerVibration(255, 150, currentMillis);
+    }
+  }
+
+  // --- 3. MOTOR TIMER SHUTOFF ---
+  if (isVibrating && (currentMillis - motorStartTime >= motorDuration)) {
+    analogWrite(motorPin, 0); 
+    isVibrating = false;
+  }
+
+  // --- 4. DISPLAY LIVE DATA ---
+  if (currentMillis - lastDisplayUpdate >= 200) {
+    lastDisplayUpdate = currentMillis;
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.setTextSize(2);
+    if (isPaused) {
+      display.println("PAUSED");
+    } else {
+      display.println("RUNNING..");
+    }
+    display.setTextSize(1);
+    display.print("\nMode: ");
+    display.println(modes[modeIndex]);
+    display.println("Target BPM: 120");
+    display.println("Logging: Dual Stream");
+    if (isPaused) {
+      display.println("\n[SELECT] to Resume");
+    } else {
+      display.println("\n[SELECT] to Pause");
+    }
+    display.println("Press [DOWN] to Stop");
+    display.display();
+  }
 }
 
 void drawMenu() {
@@ -193,27 +280,38 @@ void executeSelection() {
   display.setCursor(0, 0);
   display.setTextSize(2);
   switch(menuIndex) {
-    case 0: 
-      onRun = true; 
-      isPaused = false; 
-      display.print("STARTING..."); 
-      display.display(); 
-      delay(1000); 
+    case 0:
+      onRun = true;
+      isPaused = false;
+      
+      // Wipe old logs and start a clean 3-column data tracking format
+      LittleFS.remove(CSV_FILE_PATH);
+      {
+        File file = LittleFS.open(CSV_FILE_PATH, FILE_WRITE);
+        if (file) {
+          file.println("Timestamp_ms,Event_Type,Value");
+          file.close();
+        }
+      }
+
+      display.print("STARTING...");
+      display.display();
+      delay(1000);
       break;
-    case 1: 
-      changeMode(); 
-      display.println("Changing\nMODE..."); 
-      display.print("To: "); 
-      display.print(modes[modeIndex]); 
-      display.display(); 
-      delay(1500); 
-      drawMenu(); 
+    case 1:
+      changeMode();
+      display.println("Changing\nMODE...");
+      display.print("To: ");
+      display.print(modes[modeIndex]);
+      display.display();
+      delay(1500);
+      drawMenu();
       break;
-    case 2: 
-      display.println("POWERING\nOFF..."); 
-      display.display(); 
-      display.ssd1306_command(SSD1306_DISPLAYOFF); 
-      while(1); 
+    case 2:
+      display.println("POWERING\nOFF...");
+      display.display();
+      display.ssd1306_command(SSD1306_DISPLAYOFF);
+      while(1);
       break;
   }
 }
@@ -223,7 +321,7 @@ void changeMode() {
 }
 
 void triggerVibration(int strength, unsigned long duration, unsigned long now) {
-  analogWrite(motorPin, strength); // FIXED: Switched to simple, reliable analogWrite
+  analogWrite(motorPin, strength); 
   motorStartTime = now;
   motorDuration = duration;
   isVibrating = true;
