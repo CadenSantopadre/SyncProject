@@ -20,59 +20,58 @@ bool isPaused = false;
 
 bool onSteady = true;
 
-float accel = 0.0; //Updated accel
-const float accel_thres = 5.0; //MUST be tailored to the runner
+unsigned long lastStepFireTime = 0;
+
+float accel = 0.0;
+const float accel_thres = 20.0;
 bool previousStepState = false;
 bool step_taken = false;
+volatile unsigned long step_edge_time = 0;
 unsigned long step1 = 0;
 unsigned long step2 = 0;
-unsigned long step3 = 0;
 int numSteps = 0;
 
 typedef struct struct_message {
-  float accel; //must match what ESP2 sends
+  float accel;
 } struct_message;
 
 struct_message incomingData;
 
+String CSV_FILE_PATH = "/raw_data.csv";
 String ramBuffer = "";
 int eventCounter = 0;
-unsigned long lastLogTime = 0;       //tracks beat
-unsigned long lastStepLogTime = 0;   //tracks step
+unsigned long lastLogTime = 0;
+unsigned long lastStepLogTime = 0;
 
 const int BUTTON_SELECT = 26;
 const int BUTTON_DOWN = 27;
 const int BUTTON_UP = 14;
 
-// Track previous states
 int lastUpState = HIGH;
 int lastDownState = HIGH;
 int lastSelectState = HIGH;
 
-// Press flags
 bool upPressed = false;
 bool downPressed = false;
 bool selectPressed = false;
 
-// Initialize display (128x64, I2C address 0x3C)
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 
-// --- ESP-NOW INTERRUPT CALLBACK ---
-// Triggers instantly over-the-air whenever ESP #2 sends a new sonar reading
 void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDataRaw, int len) {
   memcpy(&incomingData, incomingDataRaw, sizeof(incomingData));
   accel = incomingData.accel;
 
-  bool currentStepState = (accel > 0 && accel < accel_thres);
-
-  Serial.print("accel (gx) = ");
-  Serial.print(accel);
-
-  if (currentStepState && !previousStepState) {
-    step_taken = true;
-    Serial.println("  <-- STEP");
-  } else {
-    Serial.println();
+  bool currentStepState = (accel > accel_thres);
+  if (onRun) {
+    //Serial.print("accel (gx) = ");
+    //Serial.print(accel);
+    if (currentStepState && !previousStepState) {
+      step_taken = true;
+      step_edge_time = millis();
+      //Serial.println("  <-- STEP");
+    } else {
+      //Serial.println();
+    }
   }
   previousStepState = currentStepState;
 }
@@ -84,25 +83,22 @@ void setup() {
   pinMode(BUTTON_UP, INPUT_PULLUP);
   pinMode(motorPin, OUTPUT);
 
-  // Initialize Wireless Stack for ESP-NOW (Required)
   WiFi.mode(WIFI_STA);
   if (esp_now_init() != ESP_OK) {
-    Serial.println(F("Error initializing ESP-NOW"));
+    //Serial.println(F("Error initializing ESP-NOW"));
   } else {
     esp_now_register_recv_cb(OnDataRecv);
   }
 
-  // Initialize LittleFS Internal Flash Partition
   if (!LittleFS.begin(true)) {
-    Serial.println(F("LittleFS Storage partition initialization failed"));
-  }
-  
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println(F("SSD1306 allocation failed"));
-    for(;;);
+    //Serial.println(F("LittleFS Storage partition initialization failed"));
   }
 
-  // Welcome Screen
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    //Serial.println(F("SSD1306 allocation failed"));
+    for (;;);
+  }
+
   display.clearDisplay();
   display.setTextSize(2);
   display.setTextColor(SSD1306_WHITE);
@@ -174,13 +170,15 @@ void runRunLogic() {
   unsigned long currentMillis = millis();
   static unsigned long lastMetronomeTick = 0;
   static unsigned long lastDisplayUpdate = 0;
-  static bool toggleBeat = false;
   float cadence = 175.0;
-  if(!onSteady && numSteps == 3){
 
-    float avgPeriod = (step3-step1)/2.0;
-
-    cadence = 60000.0/avgPeriod;
+  if (!onSteady && numSteps >= 2) {
+    float period = (float)(step2 - step1); // ms between last two right-foot strikes
+    cadence = 120000.0 / period;
+    //Serial.print("[CADENCE] period=");
+    //Serial.print(period);
+    //Serial.print("ms  cadence=");
+    //Serial.println(cadence);
   }
 
   if (selectPressed) {
@@ -189,11 +187,10 @@ void runRunLogic() {
 
   // --- EXIT AND EXTRACT DATA VIA USB ---
   if (downPressed) {
-    analogWrite(motorPin, 0); // Stops motor from staying stuck on exit
+    analogWrite(motorPin, 0);
     onRun = false;
     isPaused = false;
-    
-    // 1. Flush any leftover lines in RAM to the physical flash before dumping
+
     if (ramBuffer.length() > 0) {
       File logFile = LittleFS.open(CSV_FILE_PATH, FILE_APPEND);
       if (logFile) {
@@ -203,14 +200,13 @@ void runRunLogic() {
       ramBuffer = "";
       eventCounter = 0;
     }
-    
+
     display.clearDisplay();
-    display.setCursor(0,0);
+    display.setCursor(0, 0);
     display.setTextSize(2);
     display.println("DUMPING\nDATA...");
     display.display();
 
-    // 2. Dump the accumulated data history via USB serial line
     Serial.println("\n--- START OF RUN CSV ---");
     File readFile = LittleFS.open(CSV_FILE_PATH, FILE_READ);
     if (readFile) {
@@ -219,7 +215,6 @@ void runRunLogic() {
       }
       readFile.close();
       Serial.println("--- END OF RUN CSV ---");
-      // Wipe internal log to leave memory fresh for your next workout
       LittleFS.remove(CSV_FILE_PATH);
       Serial.println("[INFO] Storage wiped and re-centered.");
     } else {
@@ -233,30 +228,32 @@ void runRunLogic() {
   // --- 1a. BEAT LOGGING STREAM (Every 300ms) ---
   if (!isPaused && (currentMillis - lastLogTime >= 300)) {
     lastLogTime = currentMillis;
-    ramBuffer += String(currentMillis) + ",BEAT,1\n"; 
+    ramBuffer += String(currentMillis) + ",BEAT,1\n";
     eventCounter++;
   }
 
-  // --- 1b. STEP LOGGING (latched flag set in OnDataRecv) ---
-  // Checks every 200ms whether a step edge was detected since the last check.
+  // --- 1b. STEP LOGGING ---
   if (!isPaused && (currentMillis - lastStepLogTime >= 200)) {
     lastStepLogTime = currentMillis;
     if (step_taken) {
-      ramBuffer += String(currentMillis) + ",STEP,1\n";
+      lastStepFireTime = step_edge_time;
+      ramBuffer += String(step_edge_time) + ",STEP,1\n";
       eventCounter++;
-      step1 = step2;
-      step2 = step3;
-      step3 = currentMillis;
 
-      if(numSteps < 3){
-          numSteps++;
-      }
-      
-      step_taken = false; // consumed - reset for the next edge
+      step1 = step2;
+      step2 = step_edge_time;
+      if (numSteps < 2) numSteps++;
+
+      //("[STEP] step1=");
+      //Serial.print(step1);
+      //Serial.print("  step2=");
+      //Serial.println(step2);
+
+      step_taken = false;
     }
   }
 
-  // --- BATCH SAVE ACTIONS ---
+  // --- BATCH SAVE ---
   if (eventCounter >= 20) {
     File logFile = LittleFS.open(CSV_FILE_PATH, FILE_APPEND);
     if (logFile) {
@@ -268,26 +265,29 @@ void runRunLogic() {
   }
 
   // --- 2. METRONOME MOTOR TICKER ---
-  if (!isPaused && (currentMillis - lastMetronomeTick >= (120.0 / cadence) * 1000)) {
-    lastMetronomeTick = currentMillis;
-    toggleBeat = !toggleBeat;
-
-    if (modeIndex == 0) { // STEADY
-      Serial.println("BEEP! (Steady)");
-      triggerVibration(255, 150, currentMillis);
-    } 
-    else if (modeIndex == 1) { // SYNC
-      if (toggleBeat) {
-        Serial.println("HIGH BEEP! (Sync)");
+  if (!isPaused) {
+    if (modeIndex == 0) { // STEADY - fixed 175 BPM
+      if (currentMillis - lastMetronomeTick >= (120000.0 / 175.0)) {
+        lastMetronomeTick = currentMillis;
+        //Serial.println("BEEP! (Steady)");
         triggerVibration(255, 150, currentMillis);
-      } else {
-        Serial.println("low beep... (Sync)");
-        triggerVibration(120, 150, currentMillis);
       }
-    } 
-    else if (modeIndex == 2) { // ANTI
-      Serial.println("BEEP-BEEP! (Anti)");
-      triggerVibration(255, 150, currentMillis);
+    }
+    else if (modeIndex == 1) { // SYNC - tracks your cadence
+      if (currentMillis - lastMetronomeTick >= (120000.0 / cadence)) {
+        lastMetronomeTick = currentMillis;
+        //Serial.println("BEEP! (Sync)");
+        triggerVibration(255, 150, currentMillis);
+      }
+    }
+    else if (modeIndex == 2) { // ANTI - fires between steps
+      float halfPeriod = 60000.0 / cadence;
+      if (numSteps >= 2 && !isVibrating &&
+          currentMillis >= lastStepFireTime + halfPeriod &&
+          currentMillis < lastStepFireTime + halfPeriod + 100) {
+        //Serial.println("BEEP! (Anti)");
+        triggerVibration(255, 150, currentMillis);
+      }
     }
   }
 
@@ -311,17 +311,17 @@ void runRunLogic() {
     display.setTextSize(1);
     display.print("Mode: ");
     display.println(modes[modeIndex]);
-    display.println("Target BPM: 120");
+    display.print("BPM: ");
+    display.println(cadence, 1);
     display.print("Accel: ");
     display.print(accel, 1);
     display.println(" (m/s^2)");
-
     if (isPaused) {
       display.println("[SELECT] to Resume");
     } else {
       display.println("[SELECT] to Pause");
     }
-    display.println("Press [DOWN] to Stop");
+    display.println("[DOWN] to Stop");
     display.display();
   }
 }
@@ -347,12 +347,16 @@ void executeSelection() {
   display.clearDisplay();
   display.setCursor(0, 0);
   display.setTextSize(2);
-  switch(menuIndex) {
+  switch (menuIndex) {
     case 0:
       onRun = true;
       isPaused = false;
       step_taken = false;
       previousStepState = false;
+      numSteps = 0;
+      step1 = 0;
+      step2 = 0;
+      step_edge_time = 0;
       LittleFS.remove(CSV_FILE_PATH);
       {
         File file = LittleFS.open(CSV_FILE_PATH, FILE_WRITE);
@@ -378,15 +382,15 @@ void executeSelection() {
       display.println("POWERING\nOFF...");
       display.display();
       display.ssd1306_command(SSD1306_DISPLAYOFF);
-      while(1);
+      while (1);
       break;
   }
 }
 
 void changeMode() {
   modeIndex = (modeIndex + 1) % 3;
-  if(modeIndex == 1 || modeIndex == 2){onSteady=false;}
-  else{onSteady=true;}
+  if (modeIndex == 1 || modeIndex == 2) { onSteady = false; }
+  else { onSteady = true; }
 }
 
 void triggerVibration(int strength, unsigned long duration, unsigned long now) {
