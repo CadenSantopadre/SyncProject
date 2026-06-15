@@ -11,7 +11,7 @@ uint8_t receiverAddress[] = {0x5C, 0x01, 0x3B, 0xBF, 0x3A, 0x4C};
 
 // Simplified structure containing only total acceleration
 typedef struct struct_message {
-    float totalAccel;
+    float accel;
 } struct_message;
 
 struct_message sensorData;
@@ -65,7 +65,7 @@ void loop() {
     sensors_event_t a, g, temp;
     if (mpu.getEvent(&a, &g, &temp)) {
         // Calculate 3D vector magnitude: sqrt(x^2 + y^2 + z^2)
-        sensorData.totalAccel = sqrt(sq(a.acceleration.x) + sq(a.acceleration.y) + sq(a.acceleration.z));
+        sensorData.accel = sqrt(sq(a.acceleration.x) + sq(a.acceleration.y) + sq(a.acceleration.z));
 
         // Send the single float structure
         esp_now_send(receiverAddress, (uint8_t *) &sensorData, sizeof(sensorData));
