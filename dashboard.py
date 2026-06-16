@@ -46,7 +46,7 @@ class MainWindow(QMainWindow):
         self.setGeometry(0, 0, 1000, 700) #0,0 on the monitor; then it's x,y is 1000,700
         
         #intake the data and then process it
-        filename, _ = QFileDialog.getOpenFileName(self,"Select Run File","","CSV Files (*.csv)")
+        filename, _ = QFileDialog.getOpenFileName(self,"Select Run File","","Text Files (*.txt)")
 
         if filename:
             self.process_data(filename)
@@ -73,7 +73,7 @@ class MainWindow(QMainWindow):
         if pd.isna(self.df.loc[1, "Rolling_Avg"]):
             self.df.loc[1, "Rolling_Avg"] = (self.df.loc[0, "Step_Difference"] + self.df.loc[1, "Step_Difference"] + self.df.loc[2, "Step_Difference"]) / 3
             
-        self.df["Cadence"] = 60 / self.df["Rolling_Avg"]
+        self.df["Cadence"] = 120*1000 / self.df["Rolling_Avg"]
         self.df["Beat-Step"] = self.df["Beat"] - self.df["Step"]
 
         steps = self.df["Step"].dropna().sort_values().values
@@ -108,7 +108,7 @@ class MainWindow(QMainWindow):
 
         self.steps_taken = len(self.df)
         self.avg_cadence = int(self.df["Cadence"].mean())
-        self.avg_hr = int(self.df["HR"].mean())
+        #self.avg_hr = int(self.df["HR"].mean())
         self.avg_rpa = int(self.df["Phase_Deg"].mean())
 
         self.time_axis = np.arange(len(self.df))
@@ -255,7 +255,6 @@ class MainWindow(QMainWindow):
                 <hr>
                 <p>Steps Taken: {self.steps_taken}</p>
                 <p>Average Cadence: {self.avg_cadence}</p>
-                <p>Average Heart Rate: {self.avg_hr}</p>
                 <p>Average RPA: {self.avg_rpa}</p>
             </div>
         """)
