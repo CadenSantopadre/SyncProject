@@ -57,6 +57,7 @@ int lastSelectState = HIGH;
 bool upPressed = false;
 bool downPressed = false;
 bool selectPressed = false;
+float steadyCadence = 175.0;
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 
@@ -168,19 +169,45 @@ void runRunLogic() {
   unsigned long currentMillis = millis();
   static unsigned long lastMetronomeTick = 0;
   static unsigned long lastDisplayUpdate = 0;
-  float cadence = 175.0;
+  float cadence;
 
-  if (!onSteady && numSteps >= 2) {
-    float period = (float)(step2 - step1);
-    cadence = 120000.0 / period;
+  if (onSteady) {
+      cadence = steadyCadence;
+  }
+  else if (numSteps >= 2) {
+      float period = (float)(step2 - step1);
+      cadence = 120000.0 / period;
+  }
+  else {
+      cadence = 175.0;   // default until enough steps are detected
   }
 
   if (selectPressed) {
     isPaused = !isPaused;
   }
 
+  // Change cadence while paused in steady mode
+  if (isPaused && modeIndex == 0) {
+
+      if (upPressed) {
+          steadyCadence += 1.0;
+      }
+
+      if (downPressed) {
+          steadyCadence -= 1.0;
+      }
+
+      if (steadyCadence < 100) {
+          steadyCadence = 100;
+      }
+
+      if (steadyCadence > 220) {
+          steadyCadence = 220;
+      }
+  }
+
   // --- EXIT AND DUMP ---
-  if (downPressed) {
+  if (downPressed && !isPaused) {
     analogWrite(motorPin, 0);
     onRun = false;
     isPaused = false;
@@ -245,7 +272,7 @@ void runRunLogic() {
   // --- 2. METRONOME MOTOR TICKER ---
   if (!isPaused) {
     if (modeIndex == 0) { // STEADY - fixed 175 BPM
-      if (currentMillis - lastMetronomeTick >= (120000.0 / 175.0)) {
+      if (currentMillis - lastMetronomeTick >= (120000.0 / steadyCadence)) {
         lastMetronomeTick = currentMillis;
         triggerVibration(255, 150, currentMillis);
       }
@@ -280,6 +307,7 @@ void runRunLogic() {
     display.setTextSize(2);
     if (isPaused) {
       display.println("PAUSED");
+      
     } else {
       display.println("RUNNING..");
     }
@@ -287,7 +315,12 @@ void runRunLogic() {
     display.print("Mode: ");
     display.println(modes[modeIndex]);
     display.print("BPM: ");
-    display.println(cadence, 1);
+    if(onSteady){
+      display.println(steadyCadence,1);
+    }
+    if(!onSteady){
+      display.println(cadence, 1);
+    }
     display.print("Accel: ");
     display.print(accel, 1);
     display.println(" (m/s^2)");
