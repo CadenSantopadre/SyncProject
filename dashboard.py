@@ -7,16 +7,18 @@ from PyQt6.QtCore import Qt
 # Matplotlib PyQt backend imports
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from mpl_toolkits.mplot3d import Axes3D
 
 class MatplotlibWidget(FigureCanvas): #This is how we set up the graph so it can be used as a widget
     def __init__(self):
-        fig = Figure(figsize=(6, 4), dpi=100) #dpi is % of how much it takes up the space
-        self.axes = fig.add_subplot(111) #111 means 1 row, 1 column, 1st subplot
-        super().__init__(fig) #No clue what this does
+        self.fig = Figure(figsize=(6, 4), dpi=100) #dpi is % of how much it takes up the space
+        self.axes = self.fig.add_subplot(111) #111 means 1 row, 1 column, 1st subplot
+        super().__init__(self.fig) #No clue what this does
         
     def update_graph(self, x, y, title, ylabel, plot_type="plot", color='blue', ylim=None, ref_line=None):
         #when updating we clear the graph first
-        self.axes.clear()
+        self.fig.clear()
+        self.axes = self.fig.add_subplot(111)
         
         #We select if it's scatter or plot based on what it's in the array... dictionary?
         if plot_type == "scatter":
@@ -37,6 +39,19 @@ class MatplotlibWidget(FigureCanvas): #This is how we set up the graph so it can
 
     def set_x_limits(self, x_min, x_max):
         self.axes.set_xlim(x_min, x_max)
+        self.draw()
+    
+    def update_3d_graph(self,x,y,z,title):
+        self.fig.clear()
+        self.axes = self.fig.add_subplot(111,projection="3d")
+        t = np.arange(len(x))
+
+        self.axes.plot(x,y,z)
+        self.axes.set_xlabel("Cadence")
+        self.axes.set_ylabel("RPA")
+        self.axes.set_zlabel("R")
+
+        self.axes.set_title(title)
         self.draw()
 
 class MainWindow(QMainWindow):
@@ -117,7 +132,7 @@ class MainWindow(QMainWindow):
         self.graphs = {
             "Beat-Step": {
                 "title": "Viewing Beat-Step Differences",
-                "ylabel": "Beat-Step Difference (s)",
+                "ylabel": "Beat-Step Difference (ms)",
                 "y": self.df["Beat-Step"],
                 "type": "scatter",
                 "color": "purple"
@@ -163,6 +178,7 @@ class MainWindow(QMainWindow):
         btn_cadence = QPushButton("View Cadence")
         btn_phase = QPushButton("View Phase")
         btn_R = QPushButton("View R")
+        btn_state = QPushButton("View State Space")
         
         #When we click, we need to connect to the SLOT in PyQt,
         btn_beat_step.clicked.connect(lambda: self.set_plot("Beat-Step", )) #Using just self.set_plot(...) leads to python needing the function before it's created...?
@@ -170,11 +186,13 @@ class MainWindow(QMainWindow):
         btn_cadence.clicked.connect(lambda: self.set_plot("Cadence"))
         btn_phase.clicked.connect(lambda: self.set_plot("Phase"))
         btn_R.clicked.connect(lambda: self.set_plot("R"))
+        btn_state.clicked.connect(lambda: self.set_plot("State Space"))
         
         left_layout.addWidget(btn_beat_step) #These create hte buttons
         left_layout.addWidget(btn_cadence)
         left_layout.addWidget(btn_phase)
         left_layout.addWidget(btn_R)
+        left_layout.addWidget(btn_state)
         left_layout.addStretch() #addStretch() makes it so everything is at the top, rather than spaced out and centered
 
         #We do the same thing for Right side, instead making it a big graph with an overview below
@@ -229,7 +247,28 @@ class MainWindow(QMainWindow):
         self.graph_widget.set_x_limits(min_val, max_val)
 
     def set_plot(self, graph_key):
-        """Your updated plotting method."""
+
+        if graph_key == "State Space":
+            self.graph_widget.update_3d_graph(
+            self.df["Cadence"],
+            self.df["Phase_Deg"],
+            self.df["R"],
+            "Synchronization State Space"
+        )
+            self.sld_min.hide()
+            self.sld_max.hide()
+            self.lbl_min.hide()
+            self.lbl_max.hide()
+
+            return
+
+        self.sld_min.show()
+        self.sld_max.show()
+        self.lbl_min.show()
+        self.lbl_max.show()
+
+
+
         graph_cfg = self.graphs[graph_key]
         
         # Pass your new self.time_axis array into the update call
