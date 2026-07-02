@@ -11,7 +11,7 @@ const int TOTAL_ITEMS = 3;
 const char* modes[] = {"Steady","Sync","Anti"};
 int modeIndex = 0;
 
-const int motorPin = 25;
+const int motorPin = 14;
 bool isVibrating = false;
 unsigned long motorStartTime = 0;
 unsigned long motorDuration = 100;
@@ -47,8 +47,8 @@ unsigned long lastLogTime = 0;
 unsigned long lastStepLogTime = 0;
 
 const int BUTTON_SELECT = 26;
-const int BUTTON_DOWN = 27;
-const int BUTTON_UP = 14;
+const int BUTTON_DOWN = 25;
+const int BUTTON_UP = 27;
 
 int lastUpState = HIGH;
 int lastDownState = HIGH;
@@ -206,36 +206,28 @@ void runRunLogic() {
       }
   }
 
-  // --- EXIT AND DUMP ---
+  // --- EXIT ---
   if (downPressed && !isPaused) {
     analogWrite(motorPin, 0);
+    isVibrating = false;
     onRun = false;
     isPaused = false;
+    
+    // Clean up any remaining partial logs
+    hasPendingStep = false;
+    hasPendingBeat = false;
 
     display.clearDisplay();
     display.setCursor(0, 0);
     display.setTextSize(2);
-    display.println("DUMPING\nDATA...");
+    display.println("RUN SAVED!");
     display.display();
-
-    Serial.println("\n--- START OF RUN CSV ---");
-    File readFile = LittleFS.open(CSV_FILE_PATH, FILE_READ);
-    if (readFile) {
-      while (readFile.available()) {
-        Serial.write(readFile.read());
-      }
-      readFile.close();
-      LittleFS.remove(CSV_FILE_PATH);
-      Serial.println("--- END OF RUN CSV ---");
-      Serial.println("[INFO] Storage wiped.");
-    } else {
-      Serial.println("No data found.");
-    }
-
+    
     delay(1500);
     drawMenu();
     return;
   }
+
 
   // --- 1a. BEAT LOGGING (Every 300ms) ---
   if (!isPaused && (currentMillis - lastLogTime >= 300)) {
@@ -343,7 +335,7 @@ void drawMenu() {
     switch (i) {
       case 0: display.println("RUN"); break;
       case 1: display.println("MODE"); break;
-      case 2: display.println("POWER OFF"); break;
+      case 2: display.println("DUMP"); break;
     }
   }
   display.setCursor(0, menuIndex * 20);
@@ -355,8 +347,9 @@ void executeSelection() {
   display.clearDisplay();
   display.setCursor(0, 0);
   display.setTextSize(2);
+
   switch (menuIndex) {
-    case 0:
+    case 0: // RUN MODE
       onRun = true;
       isPaused = false;
       step_taken = false;
@@ -369,7 +362,9 @@ void executeSelection() {
       hasPendingBeat = false;
       pendingStep = 0;
       pendingBeat = 0;
-      LittleFS.remove(CSV_FILE_PATH);
+      
+      // Wipe old runs so a new run starts fresh
+      LittleFS.remove(CSV_FILE_PATH); 
       {
         File file = LittleFS.open(CSV_FILE_PATH, FILE_WRITE);
         if (file) {
@@ -381,23 +376,56 @@ void executeSelection() {
       display.display();
       delay(1000);
       break;
-    case 1:
+
+    case 1: // CHANGE MODE
       changeMode();
       display.println("Changing\nMODE...");
-      display.print("To: ");
+      display.print("To: "); 
       display.print(modes[modeIndex]);
       display.display();
       delay(1500);
       drawMenu();
       break;
-    case 2:
-      display.println("POWERING\nOFF...");
+
+    case 2: // DUMP MODE (MOVED LOGIC HERE)
+      display.println("DUMPING\nDATA...");
       display.display();
-      display.ssd1306_command(SSD1306_DISPLAYOFF);
-      while (1);
+      
+      Serial.println("\n--- START OF RUN CSV ---");
+      if (LittleFS.exists(CSV_FILE_PATH)) {
+        File readFile = LittleFS.open(CSV_FILE_PATH, FILE_READ);
+        if (readFile) {
+          while (readFile.available()) {
+            Serial.write(readFile.read());
+          }
+          readFile.close();
+          
+          // Delete file after reading so it doesn't double dump next time
+          LittleFS.remove(CSV_FILE_PATH); 
+          Serial.println("--- END OF RUN CSV ---");
+          Serial.println("[INFO] Storage wiped cleanly.");
+          
+          display.clearDisplay();
+          display.setCursor(0, 0);
+          display.println("DUMP\nSUCCESS!\nWIPED.");
+          display.display();
+        } else {
+          Serial.println("Error reading file.");
+        }
+      } else {
+        Serial.println("No data found or file already dumped.");
+        display.clearDisplay();
+        display.setCursor(0, 0);
+        display.println("NO DATA\nFOUND");
+        display.display();
+      }
+      
+      delay(2000);
+      drawMenu();
       break;
   }
 }
+
 
 void changeMode() {
   modeIndex = (modeIndex + 1) % 3;
