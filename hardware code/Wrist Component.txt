@@ -47,8 +47,8 @@ unsigned long lastLogTime = 0;
 unsigned long lastStepLogTime = 0;
 
 const int BUTTON_SELECT = 26;
-const int BUTTON_DOWN = 27;
-const int BUTTON_UP = 14;
+const int BUTTON_DOWN = 25;
+const int BUTTON_UP = 27;
 
 int lastUpState = HIGH;
 int lastDownState = HIGH;
