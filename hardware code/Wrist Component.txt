@@ -11,7 +11,7 @@ const int TOTAL_ITEMS = 3;
 const char* modes[] = {"Steady","Sync","Anti"};
 int modeIndex = 0;
 
-const int motorPin = 25;
+const int motorPin = 14;
 bool isVibrating = false;
 unsigned long motorStartTime = 0;
 unsigned long motorDuration = 100;
