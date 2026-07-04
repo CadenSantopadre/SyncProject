@@ -1,6 +1,7 @@
 import sys
 import os
 import itertools
+import warnings
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -18,6 +19,14 @@ from mpl_toolkits.mplot3d import Axes3D
 # ============================================================
 # MATPLOTLIB WIDGET
 # ============================================================
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PARTICIPANTS_PATH = os.path.join(BASE_DIR, "participants.csv")
+participant_df = pd.read_csv(PARTICIPANTS_PATH)
+participant_df["Name"] = participant_df["Name"].astype(str).str.strip()
+participant_df["BaselineCadence"] = pd.to_numeric(participant_df["BaselineCadence"], errors="coerce")
+baseline_dict = participant_df.set_index("Name")["BaselineCadence"].to_dict()
+
 class MatplotlibWidget(FigureCanvas):  # This is how we set up the graph so it can be used as a widget
     def __init__(self):
         self.fig = Figure(figsize=(6, 4), dpi=100)  # dpi is % of how much it takes up the space
@@ -62,7 +71,6 @@ class MatplotlibWidget(FigureCanvas):  # This is how we set up the graph so it c
         self.axes.set_title(title)
         self.draw()
 
-    # ---- NEW: group-comparison plots for the multi-run synopsis ----
     def update_bar_with_error(self, categories, means, stds, title, ylabel, colors=None):
         self.fig.clear()
         self.axes = self.fig.add_subplot(111)
@@ -102,8 +110,16 @@ class MatplotlibWidget(FigureCanvas):  # This is how we set up the graph so it c
 # CORE ANALYSIS (shared by single-run and multi-run modes)
 # ============================================================
 def process_run(filename):
-    """Runs the full beat/step/phase analysis pipeline on one run file and
-    returns both the processed DataFrame and a dict of run-level summary stats."""
+    run_name = os.path.basename(filename)
+    stem = os.path.splitext(run_name)[0]
+    participant = stem.split("_")[0].strip()
+
+    baseline = baseline_dict.get(participant, np.nan)
+    if pd.isna(baseline):
+        warnings.warn(
+            f"No baseline cadence found for participant '{participant}' in {PARTICIPANTS_PATH}; using NaN for baseline metrics.",
+            UserWarning,
+        )
 
     df = pd.read_csv(filename)
 
@@ -117,6 +133,7 @@ def process_run(filename):
         df.loc[1, "Rolling_Avg"] = (df.loc[0, "Step_Difference"] + df.loc[1, "Step_Difference"] + df.loc[2, "Step_Difference"]) / 3
 
     df["Cadence"] = 120 * 1000 / df["Rolling_Avg"]
+    df["Delta_Cadence"] = df["Cadence"] - baseline
     df["Beat-Step"] = df["Beat"] - df["Step"]
 
     steps = df["Step"].dropna().sort_values().values
@@ -143,13 +160,25 @@ def process_run(filename):
     rolling_mean_vector = df["Phase_Vector"].rolling(window=3).mean()
     df["R"] = np.abs(rolling_mean_vector)
 
+    avg_cadence = float(df["Cadence"].mean())
+    if pd.notna(baseline) and baseline != 0:
+        delta_cadence = avg_cadence - baseline
+        percent_delta = (delta_cadence / baseline) * 100
+    else:
+        delta_cadence = np.nan
+        percent_delta = np.nan
+
     return {
         "filename": filename,
         "run_name": os.path.basename(filename),
+        "participant": participant,
+        "baseline_cadence": baseline,
+        "delta_cadence": delta_cadence,
+        "percent_delta": percent_delta,
         "df": df,
         "time_axis": np.arange(len(df)),
         "steps_taken": len(df),
-        "avg_cadence": float(df["Cadence"].mean()),
+        "avg_cadence": avg_cadence,
         "std_cadence": float(df["Cadence"].std()),
         "avg_beat_step": float(df["Beat-Step"].mean()),
         "std_beat_step": float(df["Beat-Step"].std()),
@@ -176,6 +205,14 @@ def build_graph_configs(df):
             "y": df["Cadence"],
             "type": "plot",
             "color": "teal"
+        },
+        "Delta_Cadence": {
+            "title": "Viewing Delta Cadence",
+            "ylabel": "ΔCadence (spm)",
+            "y": df["Delta_Cadence"],
+            "type": "plot",
+            "color": "orange",
+            "ref_line": 0
         },
         "Phase": {
             "title": "Relative Phase Angle (0° = Perfect Synchronization)",
@@ -212,6 +249,7 @@ class RunDetailWindow(QMainWindow):
         self.time_axis = run_info["time_axis"]
         self.steps_taken = run_info["steps_taken"]
         self.avg_cadence = run_info["avg_cadence"]
+        self.delta_cadence = run_info["delta_cadence"]
         self.avg_rpa = run_info["avg_phase"]
         self.graphs = build_graph_configs(self.df)
 
@@ -229,18 +267,21 @@ class RunDetailWindow(QMainWindow):
 
         btn_beat_step = QPushButton("View Beat-Step")
         btn_cadence = QPushButton("View Cadence")
+        btn_delta_cadence = QPushButton("View Delta Cadence")
         btn_phase = QPushButton("View Phase")
         btn_R = QPushButton("View R")
         btn_state = QPushButton("View State Space")
 
         btn_beat_step.clicked.connect(lambda: self.set_plot("Beat-Step"))
         btn_cadence.clicked.connect(lambda: self.set_plot("Cadence"))
+        btn_delta_cadence.clicked.connect(lambda: self.set_plot("Delta_Cadence"))
         btn_phase.clicked.connect(lambda: self.set_plot("Phase"))
         btn_R.clicked.connect(lambda: self.set_plot("R"))
         btn_state.clicked.connect(lambda: self.set_plot("State Space"))
 
         left_layout.addWidget(btn_beat_step)
         left_layout.addWidget(btn_cadence)
+        left_layout.addWidget(btn_delta_cadence)
         left_layout.addWidget(btn_phase)
         left_layout.addWidget(btn_R)
         left_layout.addWidget(btn_state)
@@ -331,6 +372,7 @@ class RunDetailWindow(QMainWindow):
                 <hr>
                 <p>Steps Taken: {self.steps_taken}</p>
                 <p>Average Cadence: {self.avg_cadence:.1f}</p>
+                <p>Delta Cadence: {self.delta_cadence:.1f}</p>
                 <p>Average RPA: {self.avg_rpa:.1f}</p>
             </div>
         """)
@@ -382,6 +424,8 @@ CONDITION_COLORS = {"Steady": "#3B82F6", "Inter": "#F59E0B", "Anti": "#EF4444"}
 # (summary_df column, short label, y-axis label)
 METRICS = [
     ("Avg_Cadence", "Cadence", "Cadence (spm)"),
+    ("Delta_Cadence", "ΔCadence", "ΔCadence (spm)"),
+    ("Percent_Delta", "%ΔCadence", "Percent Change (%)"),
     ("Avg_Phase", "Phase", "Phase Angle (deg)"),
     ("Avg_R", "R", "Phase Locking Value (R)"),
     ("Avg_BeatStep", "Beat-Step", "Beat-Step Diff (ms)"),
@@ -414,10 +458,22 @@ class MultiRunWindow(QMainWindow):
             QMessageBox.warning(self, "No Data", "No valid run files were selected.")
             sys.exit()
 
+        missing_baselines = [r["participant"] for r in self.runs if pd.isna(r["baseline_cadence"])]
+        if missing_baselines:
+            QMessageBox.warning(
+                self,
+                "Missing Baseline Cadence",
+                "Baseline cadence was not found for: " + ", ".join(sorted(set(missing_baselines))) + "\nUsing NaN values for those runs.",
+            )
+
         self.summary_df = pd.DataFrame([
             {
                 "Condition": r["condition"],
                 "Run": r["run_name"],
+                "Participant": r["participant"],
+                "Baseline": r["baseline_cadence"],
+                "Delta_Cadence": r["delta_cadence"],
+                "Percent_Delta": r["percent_delta"],
                 "Steps": r["steps_taken"],
                 "Avg_Cadence": r["avg_cadence"],
                 "Avg_Phase": r["avg_phase"],
@@ -515,10 +571,12 @@ class MultiRunWindow(QMainWindow):
             sub = self.summary_df[self.summary_df["Condition"] == condition]
             if sub.empty:
                 continue
-            vals = sub[column].values
+            vals = pd.Series(sub[column].values).dropna()
+            if vals.empty:
+                continue
             categories.append(condition)
-            means.append(np.mean(vals))
-            stds.append(np.std(vals, ddof=1) if len(vals) > 1 else 0)
+            means.append(float(vals.mean()))
+            stds.append(float(vals.std(ddof=1)) if len(vals) > 1 else 0.0)
             colors.append(CONDITION_COLORS[condition])
         self.graph_widget.update_bar_with_error(categories, means, stds, f"{label} by Condition", ylabel, colors)
 
@@ -528,7 +586,9 @@ class MultiRunWindow(QMainWindow):
             sub = self.summary_df[self.summary_df["Condition"] == condition]
             if sub.empty:
                 continue
-            groups[condition] = sub[column].values
+            values = pd.Series(sub[column].values).dropna().to_numpy()
+            if values.size:
+                groups[condition] = values
 
         self._draw_metric_bar(column, label, ylabel)
 
@@ -573,10 +633,10 @@ class MultiRunWindow(QMainWindow):
         ]
         rows_html = ""
         for col1, col2, label in pairs:
-            x = self.summary_df[col1].values
-            y = self.summary_df[col2].values
-            if len(x) < 3:
-                rows_html += f"<tr><td>{label}</td><td colspan='2'>Need &ge;3 runs total</td></tr>"
+            x = pd.Series(self.summary_df[col1].values).dropna().to_numpy()
+            y = pd.Series(self.summary_df[col2].values).dropna().to_numpy()
+            if len(x) < 3 or len(y) < 3 or len(x) != len(y):
+                rows_html += f"<tr><td>{label}</td><td colspan='2'>Need &ge;3 paired runs</td></tr>"
                 continue
             r_val, p_val = stats.pearsonr(x, y)
             rows_html += f"<tr><td>{label}</td><td>r = {r_val:.3f}</td><td>p = {p_val:.4f}</td></tr>"
@@ -598,8 +658,11 @@ class MultiRunWindow(QMainWindow):
             sub = self.summary_df[self.summary_df["Condition"] == condition]
             if sub.empty:
                 continue
-            x_by_cat[condition] = sub["Avg_Cadence"].values
-            y_by_cat[condition] = sub["Avg_R"].values
+            x_vals = pd.Series(sub["Avg_Cadence"].values).dropna().to_numpy()
+            y_vals = pd.Series(sub["Avg_R"].values).dropna().to_numpy()
+            if x_vals.size and y_vals.size:
+                x_by_cat[condition] = x_vals
+                y_by_cat[condition] = y_vals
         labels = list(x_by_cat.keys())
         colors = [CONDITION_COLORS[l] for l in labels]
         self.graph_widget.update_scatter_groups(
@@ -620,6 +683,8 @@ if __name__ == "__main__":
         if not filename:
             sys.exit()
         run_info = process_run(filename)
+        if pd.isna(run_info["baseline_cadence"]):
+            QMessageBox.warning(None, "Missing Baseline Cadence", "Baseline cadence was not found for this participant. Using NaN values.")
         window = RunDetailWindow(run_info, title="Data Visualization Dashboard")
         window.show()
     elif mode == "multi":
