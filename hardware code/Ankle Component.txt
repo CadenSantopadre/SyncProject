@@ -2,26 +2,37 @@
 #include <WiFi.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
-#include <Wire.h> 
+#include <Wire.h>
 
 Adafruit_MPU6050 mpu;
 
-// REPLACE WITH YOUR RECEIVER MAC ADDRESS 
+// REPLACE WITH YOUR RECEIVER MAC ADDRESS
 uint8_t receiverAddress[] = {0x5C, 0x01, 0x3B, 0xBF, 0x3A, 0x4C};
 
-// Simplified structure containing only total acceleration
+// message struct for sending "step_taken"
 typedef struct struct_message {
-    float accel;
+    bool step_taken;
 } struct_message;
 
 struct_message sensorData;
 esp_now_peer_info_t peerInfo;
 
-// Flag to communicate send status to the main loop
 volatile bool dataSent = false;
 volatile bool sendSuccess = false;
 
-// Updated callback function signature for ESP32 Arduino Core 3.x
+// --- Active Calibration Settings ---
+unsigned long window_start_time = 0;
+unsigned long last_step_time = 0;
+
+float max_force_window = 0.0;
+float active_threshold = 20.0; // Initial Guess 
+
+const unsigned long window_duration = 2000;  // Recalibrate every 2 seconds (2000 ms)
+const unsigned long skip_period = 250;  //Skip double triggers within 250ms
+const float threshold_sensitivity = 0.70;    //Trigger at 0.7x the max peak
+const float baseline_floor = 20.0;            //Min m/s^2 to ignore
+
+//   When data is sent, set sendSuccess=ESP_NOW's answer, so we can turn on the LED
 void onDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
     dataSent = true;
     sendSuccess = (status == ESP_NOW_SEND_SUCCESS);
@@ -30,56 +41,78 @@ void onDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
 void setup() {
     Serial.begin(115200);
     while (!Serial);
-
+    
     pinMode(2, OUTPUT);
     digitalWrite(2, LOW);
 
-    // Initialize I2C and MPU6050
-    Wire.begin(21, 22); // Explicitly define SDA (21) and SCL (22) for ESP32
+    Wire.begin(21, 22); 
     if (!mpu.begin()) {
-        Serial.println("Failed to find MPU6050 chip");
+//        Serial.println("Failed to find MPU6050 chip");
         while (1) { delay(10); }
     }
-    
-    // Initialize ESP-NOW
+
     WiFi.mode(WIFI_STA);
     if (esp_now_init() != ESP_OK) {
-        Serial.println("Error initializing ESP-NOW");
+//        Serial.println("Error initializing ESP-NOW");
         return;
     }
 
     esp_now_register_send_cb(onDataSent);
 
-    // Register peer
     memcpy(peerInfo.peer_addr, receiverAddress, 6);
-    peerInfo.channel = 0;  
+    peerInfo.channel = 0;
     peerInfo.encrypt = false;
-    
     if (esp_now_add_peer(&peerInfo) != ESP_OK){
-        Serial.println("Failed to add peer");
+//        Serial.println("Failed to add peer");
         return;
     }
+
+    window_start_time = millis();
+//    Serial.println("--- Active Rolling Calibration Initialized ---");
 }
 
 void loop() {
+    unsigned long now = millis();
     sensors_event_t a, g, temp;
+
     if (mpu.getEvent(&a, &g, &temp)) {
-        // Calculate 3D vector magnitude: sqrt(x^2 + y^2 + z^2)
-        sensorData.accel = sqrt(sq(a.acceleration.x) + sq(a.acceleration.y) + sq(a.acceleration.z));
+        //sqrt(x^2 + y^2 + z^2)
+        float A_sq = sqrt(sq(a.acceleration.x) + sq(a.acceleration.y) + sq(a.acceleration.z));
 
-        // Send the single float structure
-        esp_now_send(receiverAddress, (uint8_t *) &sensorData, sizeof(sensorData));
-    }
-
-    // Handle LED status safely outside the interrupt callback
-    if (dataSent) {
-        if (sendSuccess) {
-            digitalWrite(2, HIGH);
-        } else {
-            digitalWrite(2, LOW);
+        //If the accel is greater than the max force, let it be the new max force
+        if (A_sq > max_force_window) {
+            max_force_window = A_sq;
         }
-        dataSent = false; // Reset flag
+
+        //If it's time for a new window, then do this:
+        if (now - window_start_time >= window_duration) {
+            //Only update if the new max is bigger than the floor
+            if (max_force_window > baseline_floor) { 
+                active_threshold = max_force_window * threshold_sensitivity;
+            } else {
+                //If they stopped running, bring threshold down to baseline default
+                active_threshold = baseline_floor;
+            }
+            
+            max_force_window = 0.0; //Reset the peak at the start of a new window
+            window_start_time = now;
+        }
+
+        //To detect a step, it must be greater than the threshold, and not be in the skip period
+        if (A_sq > active_threshold && (now - last_step_time > skip_period)) {
+            last_step_time = now;
+            
+            sensorData.step_taken = true;
+            esp_now_send(receiverAddress, (uint8_t *) &sensorData, sizeof(sensorData));
+            
+            //Serial.print("Footfall! Dynamic Threshold Crossed: ");
+            //Serial.println(active_threshold);
+        }
     }
 
-    delay(10);
+    if (dataSent) {
+        digitalWrite(2, sendSuccess ? HIGH : LOW);
+        dataSent = false; 
+    }
+    delay(10); // 100Hz
 }
