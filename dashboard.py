@@ -7,7 +7,7 @@ import pandas as pd
 from scipy import stats
 from PyQt6.QtWidgets import (QFileDialog, QApplication, QMainWindow, QWidget, QLabel, QSlider,
                               QVBoxLayout, QHBoxLayout, QPushButton, QTextBrowser, QDialog,
-                              QListWidget, QMessageBox)
+                              QListWidget, QMessageBox, QComboBox)
 from PyQt6.QtCore import Qt
 
 # Matplotlib PyQt backend imports
@@ -20,11 +20,7 @@ from mpl_toolkits.mplot3d import Axes3D
 # MATPLOTLIB WIDGET
 # ============================================================
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PARTICIPANTS_PATH = os.path.join(BASE_DIR, "participants.csv")
-participant_df = pd.read_csv(PARTICIPANTS_PATH)
-participant_df["Name"] = participant_df["Name"].astype(str).str.strip()
-participant_df["BaselineCadence"] = pd.to_numeric(participant_df["BaselineCadence"], errors="coerce")
+participant_df = pd.read_csv("participants.csv")
 baseline_dict = participant_df.set_index("Name")["BaselineCadence"].to_dict()
 
 class MatplotlibWidget(FigureCanvas):  # This is how we set up the graph so it can be used as a widget
@@ -105,6 +101,28 @@ class MatplotlibWidget(FigureCanvas):  # This is how we set up the graph so it c
         self.axes.grid(True, alpha=0.3)
         self.draw()
 
+    def update_poincare_plot(self, x, y, title, xlabel, ylabel, color='blue'):
+        self.fig.clear()
+        self.axes = self.fig.add_subplot(111)
+        valid = ~np.isnan(x) & ~np.isnan(y)
+        x = np.asarray(x)[valid]
+        y = np.asarray(y)[valid]
+        self.axes.scatter(x, y, color=color, alpha=0.7, edgecolors='none', s=45)
+
+        if x.size and y.size:
+            min_val = min(float(np.min(x)), float(np.min(y)))
+            max_val = max(float(np.max(x)), float(np.max(y)))
+            if np.isfinite(min_val) and np.isfinite(max_val) and min_val != max_val:
+                self.axes.plot([min_val, max_val], [min_val, max_val], color='gray', linestyle='--', alpha=0.5)
+                self.axes.set_xlim(min_val, max_val)
+                self.axes.set_ylim(min_val, max_val)
+
+        self.axes.set_title(title)
+        self.axes.set_xlabel(xlabel)
+        self.axes.set_ylabel(ylabel)
+        self.axes.grid(True, alpha=0.3)
+        self.draw()
+
 
 # ============================================================
 # CORE ANALYSIS (shared by single-run and multi-run modes)
@@ -115,11 +133,6 @@ def process_run(filename):
     participant = stem.split("_")[0].strip()
 
     baseline = baseline_dict.get(participant, np.nan)
-    if pd.isna(baseline):
-        warnings.warn(
-            f"No baseline cadence found for participant '{participant}' in {PARTICIPANTS_PATH}; using NaN for baseline metrics.",
-            UserWarning,
-        )
 
     df = pd.read_csv(filename)
 
@@ -133,6 +146,12 @@ def process_run(filename):
         df.loc[1, "Rolling_Avg"] = (df.loc[0, "Step_Difference"] + df.loc[1, "Step_Difference"] + df.loc[2, "Step_Difference"]) / 3
 
     df["Cadence"] = 120 * 1000 / df["Rolling_Avg"]
+
+    # Changes unreasonable values to baseline
+    df["Cadence"] = df["Cadence"].where(df["Cadence"] >= 60, baseline)
+
+
+
     df["Delta_Cadence"] = df["Cadence"] - baseline
     df["Beat-Step"] = df["Beat"] - df["Step"]
 
@@ -187,6 +206,13 @@ def process_run(filename):
         "avg_R": float(df["R"].mean()),
         "std_R": float(df["R"].std()),
     }
+
+
+def build_poincare_data(series):
+    series = pd.Series(series).dropna().astype(float)
+    if len(series) < 2:
+        return np.array([]), np.array([])
+    return series.iloc[:-1].to_numpy(dtype=float), series.iloc[1:].to_numpy(dtype=float)
 
 
 def build_graph_configs(df):
@@ -252,6 +278,7 @@ class RunDetailWindow(QMainWindow):
         self.delta_cadence = run_info["delta_cadence"]
         self.avg_rpa = run_info["avg_phase"]
         self.graphs = build_graph_configs(self.df)
+        self.current_plot_key = None
 
         self.init_ui()
         self.set_plot("Beat-Step")
@@ -285,6 +312,14 @@ class RunDetailWindow(QMainWindow):
         left_layout.addWidget(btn_phase)
         left_layout.addWidget(btn_R)
         left_layout.addWidget(btn_state)
+
+        cadence_settings_layout = QHBoxLayout()
+        cadence_settings_layout.addWidget(QLabel("Cadence view:"))
+        self.cadence_style = QComboBox()
+        self.cadence_style.addItems(["Time Series", "Poincaré Plot"])
+        self.cadence_style.currentTextChanged.connect(self.refresh_current_plot)
+        cadence_settings_layout.addWidget(self.cadence_style)
+        left_layout.addLayout(cadence_settings_layout)
         left_layout.addStretch()
 
         right_layout = QVBoxLayout()
@@ -319,6 +354,10 @@ class RunDetailWindow(QMainWindow):
         main_layout.addLayout(left_layout, stretch=1)
         main_layout.addLayout(right_layout, stretch=9)
 
+    def refresh_current_plot(self):
+        if self.current_plot_key is not None:
+            self.set_plot(self.current_plot_key)
+
     def handle_slider_change(self):
         min_val = self.sld_min.value()
         max_val = self.sld_max.value()
@@ -333,12 +372,30 @@ class RunDetailWindow(QMainWindow):
         self.graph_widget.set_x_limits(min_val, max_val)
 
     def set_plot(self, graph_key):
+        self.current_plot_key = graph_key
+
         if graph_key == "State Space":
             self.graph_widget.update_3d_graph(
                 self.df["Cadence"],
                 self.df["Phase_Deg"],
                 self.df["R"],
                 "Synchronization State Space"
+            )
+            self.sld_min.hide()
+            self.sld_max.hide()
+            self.lbl_min.hide()
+            self.lbl_max.hide()
+            return
+
+        if graph_key == "Cadence" and self.cadence_style.currentText() == "Poincaré Plot":
+            x, y = build_poincare_data(self.df["Cadence"])
+            self.graph_widget.update_poincare_plot(
+                x,
+                y,
+                "Cadence Poincaré Plot",
+                "Cadence_n (spm)",
+                "Cadence_{n+1} (spm)",
+                color="teal"
             )
             self.sld_min.hide()
             self.sld_max.hide()
@@ -368,7 +425,7 @@ class RunDetailWindow(QMainWindow):
 
         self.overview_widget.setHtml(f"""
             <div style="font-family: sans-serif; font-size: 14px; color: #ffffff;">
-                <h3>Run: DATE and TIME</h3>
+                <h3>Run: {filename}</h3>
                 <hr>
                 <p>Steps Taken: {self.steps_taken}</p>
                 <p>Average Cadence: {self.avg_cadence:.1f}</p>
@@ -438,6 +495,7 @@ class MultiRunWindow(QMainWindow):
         self.setWindowTitle("Multi-Run Synopsis")
         self.setGeometry(0, 0, 1200, 800)
         self.open_windows = []  # keeps drill-down windows alive
+        self.current_metric_view = None
 
         # --- Prompt for files, one category at a time ---
         self.runs = []
@@ -495,6 +553,14 @@ class MultiRunWindow(QMainWindow):
         left_layout = QVBoxLayout()
         left_layout.addWidget(QLabel("<b>Group Comparisons</b>"))
 
+        cadence_settings_layout = QHBoxLayout()
+        cadence_settings_layout.addWidget(QLabel("Cadence view:"))
+        self.cadence_style = QComboBox()
+        self.cadence_style.addItems(["Bar Chart", "Poincaré Plot"])
+        self.cadence_style.currentTextChanged.connect(self.refresh_current_metric_view)
+        cadence_settings_layout.addWidget(self.cadence_style)
+        left_layout.addLayout(cadence_settings_layout)
+
         btn_overview = QPushButton("Overview")
         btn_overview.clicked.connect(self.show_overview)
         left_layout.addWidget(btn_overview)
@@ -534,6 +600,11 @@ class MultiRunWindow(QMainWindow):
         detail_window.show()
         self.open_windows.append(detail_window)
 
+    def refresh_current_metric_view(self):
+        if self.current_metric_view is not None:
+            column, label, ylabel = self.current_metric_view
+            self._render_metric_view(column, label, ylabel)
+
     def show_overview(self):
         rows_html = ""
         for condition in CONDITIONS:
@@ -562,8 +633,14 @@ class MultiRunWindow(QMainWindow):
         </div>
         """
         self.stats_widget.setHtml(html)
-        # default graph: cadence bar chart
-        self._draw_metric_bar("Avg_Cadence", "Cadence", "Cadence (spm)")
+        self._render_metric_view("Avg_Cadence", "Cadence", "Cadence (spm)")
+
+    def _render_metric_view(self, column, label, ylabel):
+        self.current_metric_view = (column, label, ylabel)
+        if column == "Avg_Cadence" and self.cadence_style.currentText() == "Poincaré Plot":
+            self._draw_cadence_poincare_plot(label, ylabel)
+            return
+        self._draw_metric_bar(column, label, ylabel)
 
     def _draw_metric_bar(self, column, label, ylabel):
         categories, means, stds, colors = [], [], [], []
@@ -590,7 +667,7 @@ class MultiRunWindow(QMainWindow):
             if values.size:
                 groups[condition] = values
 
-        self._draw_metric_bar(column, label, ylabel)
+        self._render_metric_view(column, label, ylabel)
 
         # descriptive stats
         desc_rows = ""
@@ -624,6 +701,33 @@ class MultiRunWindow(QMainWindow):
         </div>
         """
         self.stats_widget.setHtml(html)
+
+    def _draw_cadence_poincare_plot(self, label, ylabel):
+        x_by_cat, y_by_cat = {}, {}
+        for condition in CONDITIONS:
+            x_vals, y_vals = [], []
+            for run in self.runs:
+                if run["condition"] != condition:
+                    continue
+                x_run, y_run = build_poincare_data(run["df"]["Cadence"])
+                if x_run.size:
+                    x_vals.extend(x_run.tolist())
+                    y_vals.extend(y_run.tolist())
+            if x_vals:
+                x_by_cat[condition] = np.array(x_vals)
+                y_by_cat[condition] = np.array(y_vals)
+
+        labels = list(x_by_cat.keys())
+        colors = [CONDITION_COLORS[l] for l in labels]
+        self.graph_widget.update_scatter_groups(
+            x_by_cat,
+            y_by_cat,
+            labels,
+            colors,
+            f"{label} Poincaré Plot by Condition",
+            "Cadence_n (spm)",
+            "Cadence_{n+1} (spm)"
+        )
 
     def show_correlations(self):
         pairs = [
