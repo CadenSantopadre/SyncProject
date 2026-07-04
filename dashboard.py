@@ -271,6 +271,7 @@ class RunDetailWindow(QMainWindow):
         self.setWindowTitle(title)
         self.setGeometry(0, 0, 1000, 700)
 
+        self.run_info = run_info
         self.df = run_info["df"]
         self.time_axis = run_info["time_axis"]
         self.steps_taken = run_info["steps_taken"]
@@ -320,6 +321,18 @@ class RunDetailWindow(QMainWindow):
         self.cadence_style.currentTextChanged.connect(self.refresh_current_plot)
         cadence_settings_layout.addWidget(self.cadence_style)
         left_layout.addLayout(cadence_settings_layout)
+
+        # --- Export buttons ---
+        left_layout.addWidget(QLabel("<b>Export</b>"))
+
+        btn_export_csv = QPushButton("Export Run Data (CSV)")
+        btn_export_csv.clicked.connect(self.export_run_csv)
+        left_layout.addWidget(btn_export_csv)
+
+        btn_export_png = QPushButton("Export Graph (PNG)")
+        btn_export_png.clicked.connect(self.export_graph_png)
+        left_layout.addWidget(btn_export_png)
+
         left_layout.addStretch()
 
         right_layout = QVBoxLayout()
@@ -425,7 +438,7 @@ class RunDetailWindow(QMainWindow):
 
         self.overview_widget.setHtml(f"""
             <div style="font-family: sans-serif; font-size: 14px; color: #ffffff;">
-                <h3>Run: {filename}</h3>
+                <h3>Run: {self.run_info['run_name']}</h3>
                 <hr>
                 <p>Steps Taken: {self.steps_taken}</p>
                 <p>Average Cadence: {self.avg_cadence:.1f}</p>
@@ -433,6 +446,44 @@ class RunDetailWindow(QMainWindow):
                 <p>Average RPA: {self.avg_rpa:.1f}</p>
             </div>
         """)
+
+    def export_run_csv(self):
+        default_name = f"{self.run_info['participant']}_{os.path.splitext(self.run_info['run_name'])[0]}_metrics.csv"
+        path, _ = QFileDialog.getSaveFileName(self, "Export Run Data", default_name, "CSV Files (*.csv)")
+        if not path:
+            return
+        try:
+            metrics = {
+                "Run": self.run_info["run_name"],
+                "Participant": self.run_info["participant"],
+                "Baseline_Cadence": self.run_info["baseline_cadence"],
+                "Steps_Taken": self.run_info["steps_taken"],
+                "Avg_Cadence": self.run_info["avg_cadence"],
+                "Std_Cadence": self.run_info["std_cadence"],
+                "Delta_Cadence": self.run_info["delta_cadence"],
+                "Percent_Delta_Cadence": self.run_info["percent_delta"],
+                "Avg_Beat_Step": self.run_info["avg_beat_step"],
+                "Std_Beat_Step": self.run_info["std_beat_step"],
+                "Avg_Phase": self.run_info["avg_phase"],
+                "Std_Phase": self.run_info["std_phase"],
+                "Avg_R": self.run_info["avg_R"],
+                "Std_R": self.run_info["std_R"],
+            }
+            pd.DataFrame([metrics]).to_csv(path, index=False)
+            QMessageBox.information(self, "Export Complete", f"Run data exported to:\n{path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Export Failed", f"Could not export run data:\n{e}")
+
+    def export_graph_png(self):
+        default_name = f"{self.current_plot_key or 'graph'}.png"
+        path, _ = QFileDialog.getSaveFileName(self, "Export Graph", default_name, "PNG Files (*.png)")
+        if not path:
+            return
+        try:
+            self.graph_widget.fig.savefig(path, dpi=150, bbox_inches='tight')
+            QMessageBox.information(self, "Export Complete", f"Graph exported to:\n{path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Export Failed", f"Could not export graph:\n{e}")
 
 
 # ============================================================
@@ -534,9 +585,13 @@ class MultiRunWindow(QMainWindow):
                 "Percent_Delta": r["percent_delta"],
                 "Steps": r["steps_taken"],
                 "Avg_Cadence": r["avg_cadence"],
+                "Std_Cadence": r["std_cadence"],
                 "Avg_Phase": r["avg_phase"],
+                "Std_Phase": r["std_phase"],
                 "Avg_R": r["avg_R"],
+                "Std_R": r["std_R"],
                 "Avg_BeatStep": r["avg_beat_step"],
+                "Std_BeatStep": r["std_beat_step"],
             }
             for r in self.runs
         ])
@@ -575,6 +630,29 @@ class MultiRunWindow(QMainWindow):
         btn_corr = QPushButton("Correlations")
         btn_corr.clicked.connect(self.show_correlations)
         left_layout.addWidget(btn_corr)
+
+        # --- Export controls ---
+        left_layout.addWidget(QLabel("<b>Export</b>"))
+
+        participant_row = QHBoxLayout()
+        participant_row.addWidget(QLabel("Participant:"))
+        self.participant_combo = QComboBox()
+        participants = sorted(self.summary_df["Participant"].dropna().unique().tolist())
+        self.participant_combo.addItems(participants)
+        participant_row.addWidget(self.participant_combo)
+        left_layout.addLayout(participant_row)
+
+        btn_export_participant = QPushButton("Export Participant Data (CSV)")
+        btn_export_participant.clicked.connect(self.export_participant_csv)
+        left_layout.addWidget(btn_export_participant)
+
+        btn_export_all = QPushButton("Export All Runs (CSV)")
+        btn_export_all.clicked.connect(self.export_all_runs_csv)
+        left_layout.addWidget(btn_export_all)
+
+        btn_export_graph = QPushButton("Export Graph (PNG)")
+        btn_export_graph.clicked.connect(self.export_graph_png)
+        left_layout.addWidget(btn_export_graph)
 
         left_layout.addWidget(QLabel("<b>Individual Runs</b> (double-click to open)"))
         self.run_list = QListWidget()
@@ -772,6 +850,48 @@ class MultiRunWindow(QMainWindow):
         self.graph_widget.update_scatter_groups(
             x_by_cat, y_by_cat, labels, colors, "Cadence vs R by Condition", "Cadence (spm)", "R"
         )
+
+    def export_participant_csv(self):
+        participant = self.participant_combo.currentText()
+        if not participant:
+            QMessageBox.warning(self, "No Participant", "No participant selected.")
+            return
+        sub = self.summary_df[self.summary_df["Participant"] == participant]
+        if sub.empty:
+            QMessageBox.warning(self, "No Data", f"No runs found for {participant}.")
+            return
+        default_name = f"{participant}_all_runs_metrics.csv"
+        path, _ = QFileDialog.getSaveFileName(self, "Export Participant Data", default_name, "CSV Files (*.csv)")
+        if not path:
+            return
+        try:
+            sub.to_csv(path, index=False)
+            QMessageBox.information(self, "Export Complete", f"Data for {participant} exported to:\n{path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Export Failed", f"Could not export participant data:\n{e}")
+
+    def export_all_runs_csv(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Export All Runs", "all_runs_metrics.csv", "CSV Files (*.csv)")
+        if not path:
+            return
+        try:
+            self.summary_df.to_csv(path, index=False)
+            QMessageBox.information(self, "Export Complete", f"All run data exported to:\n{path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Export Failed", f"Could not export data:\n{e}")
+
+    def export_graph_png(self):
+        default_name = "graph.png"
+        if self.current_metric_view is not None:
+            default_name = f"{self.current_metric_view[1]}.png"
+        path, _ = QFileDialog.getSaveFileName(self, "Export Graph", default_name, "PNG Files (*.png)")
+        if not path:
+            return
+        try:
+            self.graph_widget.fig.savefig(path, dpi=150, bbox_inches='tight')
+            QMessageBox.information(self, "Export Complete", f"Graph exported to:\n{path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Export Failed", f"Could not export graph:\n{e}")
 
 
 # ============================================================
