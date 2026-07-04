@@ -22,9 +22,7 @@ bool onSteady = true;
 
 unsigned long lastStepFireTime = 0;
 
-float accel = 0.0;
-const float accel_thres = 20.0;
-bool previousStepState = false;
+
 bool step_taken = false;
 volatile unsigned long step_edge_time = 0;
 unsigned long step1 = 0;
@@ -32,7 +30,7 @@ unsigned long step2 = 0;
 int numSteps = 0;
 
 typedef struct struct_message {
-  float accel;
+  bool stepDetected;
 } struct_message;
 
 struct_message incomingData;
@@ -63,16 +61,12 @@ Adafruit_SSD1306 display(128, 64, &Wire, -1);
 
 void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDataRaw, int len) {
   memcpy(&incomingData, incomingDataRaw, sizeof(incomingData));
-  accel = incomingData.accel;
 
-  bool currentStepState = (accel > accel_thres);
-  if (onRun) {
-    if (currentStepState && !previousStepState) {
-      step_taken = true;
-      step_edge_time = millis();
-    }
+  // Sender already decided a step occurred; just latch it with a timestamp.
+  if (onRun && incomingData.stepDetected) {
+    step_taken = true;
+    step_edge_time = millis();
   }
-  previousStepState = currentStepState;
 }
 
 void setup() {
@@ -313,9 +307,6 @@ void runRunLogic() {
     if(!onSteady){
       display.println(cadence, 1);
     }
-    display.print("Accel: ");
-    display.print(accel, 1);
-    display.println(" (m/s^2)");
     if (isPaused) {
       display.println("[SELECT] to Resume");
     } else {
@@ -353,7 +344,6 @@ void executeSelection() {
       onRun = true;
       isPaused = false;
       step_taken = false;
-      previousStepState = false;
       numSteps = 0;
       step1 = 0;
       step2 = 0;
