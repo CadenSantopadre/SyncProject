@@ -22,17 +22,16 @@ bool onSteady = true;
 
 unsigned long lastStepFireTime = 0;
 
-float accel = 0.0;
-const float accel_thres = 20.0;
-bool previousStepState = false;
+// Step detection now happens on the sender. This side just reacts to the flag.
 bool step_taken = false;
 volatile unsigned long step_edge_time = 0;
 unsigned long step1 = 0;
 unsigned long step2 = 0;
 int numSteps = 0;
 
+// Sender now transmits a single bool: "a step just happened"
 typedef struct struct_message {
-  float accel;
+  bool stepDetected;
 } struct_message;
 
 struct_message incomingData;
@@ -56,23 +55,27 @@ int lastSelectState = HIGH;
 
 bool upPressed = false;
 bool downPressed = false;
-bool selectPressed = false;
+bool selectPressed = false;   // fires on release of any tap, short or long
+bool selectLongPress = false; // additionally fires on release if held >= LONG_PRESS_MS
+unsigned long selectPressStart = 0;
+const unsigned long LONG_PRESS_MS = 600;
+
 float steadyCadence = 175.0;
+
+// Long-pressing SELECT on the MODE menu item (while Steady is the active mode)
+// opens a small "set BPM" screen. No dedicated menu slot needed.
+bool isEditingSteadyCadence = false;
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 
 void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDataRaw, int len) {
   memcpy(&incomingData, incomingDataRaw, sizeof(incomingData));
-  accel = incomingData.accel;
 
-  bool currentStepState = (accel > accel_thres);
-  if (onRun) {
-    if (currentStepState && !previousStepState) {
-      step_taken = true;
-      step_edge_time = millis();
-    }
+  // Sender already decided a step occurred; just latch it with a timestamp.
+  if (onRun && incomingData.stepDetected) {
+    step_taken = true;
+    step_edge_time = millis();
   }
-  previousStepState = currentStepState;
 }
 
 void setup() {
@@ -125,6 +128,7 @@ void readButtons() {
   upPressed = false;
   downPressed = false;
   selectPressed = false;
+  selectLongPress = false;
 
   if (upState == LOW && lastUpState == HIGH) {
     upPressed = true;
@@ -138,14 +142,26 @@ void readButtons() {
   }
   lastDownState = downState;
 
+  // SELECT is evaluated on release so we can tell a tap from a hold.
   if (selectState == LOW && lastSelectState == HIGH) {
-    selectPressed = true;
+    selectPressStart = millis();
+    delay(50);
+  } else if (selectState == HIGH && lastSelectState == LOW) {
+    selectPressed = true; // every release counts as a normal "select" event...
+    if (millis() - selectPressStart >= LONG_PRESS_MS) {
+      selectLongPress = true; // ...plus this extra flag if it was held long enough
+    }
     delay(50);
   }
   lastSelectState = selectState;
 }
 
 void runMenuLogic() {
+  if (isEditingSteadyCadence) {
+    handleCadenceEdit();
+    return;
+  }
+
   bool menuChanged = false;
   if (upPressed) {
     menuIndex = (menuIndex - 1 + TOTAL_ITEMS) % TOTAL_ITEMS;
@@ -155,6 +171,15 @@ void runMenuLogic() {
     menuIndex = (menuIndex + 1) % TOTAL_ITEMS;
     menuChanged = true;
   }
+
+  // Long-press SELECT on MODE, while Steady is active, opens the BPM editor
+  // instead of cycling modes.
+  if (selectLongPress && menuIndex == 1 && modeIndex == 0) {
+    isEditingSteadyCadence = true;
+    drawCadenceEdit();
+    return;
+  }
+
   if (selectPressed) {
     executeSelection();
     if (!onRun) {
@@ -162,6 +187,46 @@ void runMenuLogic() {
     }
   } else if (menuChanged) {
     drawMenu();
+  }
+}
+
+void drawCadenceEdit() {
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("SET BPM");
+  display.println();
+  display.print(steadyCadence, 1);
+  display.setTextSize(1);
+  display.println();
+  display.println("[UP/DN] Adjust");
+  display.println("[SELECT] Save");
+  display.display();
+}
+
+void handleCadenceEdit() {
+  bool changed = false;
+
+  if (upPressed) {
+    steadyCadence += 1.0;
+    changed = true;
+  }
+  if (downPressed) {
+    steadyCadence -= 1.0;
+    changed = true;
+  }
+  if (steadyCadence < 100) steadyCadence = 100;
+  if (steadyCadence > 220) steadyCadence = 220;
+
+  if (selectPressed) {
+    isEditingSteadyCadence = false;
+    drawMenu();
+    return;
+  }
+
+  if (changed) {
+    drawCadenceEdit();
   }
 }
 
@@ -313,9 +378,6 @@ void runRunLogic() {
     if(!onSteady){
       display.println(cadence, 1);
     }
-    display.print("Accel: ");
-    display.print(accel, 1);
-    display.println(" (m/s^2)");
     if (isPaused) {
       display.println("[SELECT] to Resume");
     } else {
@@ -353,7 +415,6 @@ void executeSelection() {
       onRun = true;
       isPaused = false;
       step_taken = false;
-      previousStepState = false;
       numSteps = 0;
       step1 = 0;
       step2 = 0;
