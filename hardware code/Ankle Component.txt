@@ -20,19 +20,58 @@ esp_now_peer_info_t peerInfo;
 volatile bool dataSent = false;
 volatile bool sendSuccess = false;
 
-// --- Active Calibration Settings ---
-unsigned long window_start_time = 0;
+// --- Toggle this to turn all debug prints on/off in one place ---
+#define DEBUG_SERIAL true
+
+// --- Core thresholding parameters ---
+const float threshold_sensitivity = 0.5;    // Trigger at 0.5x the peak EMA
+const float baseline_floor = 20.0;          // Min m/s^2 to ignore
+
+float alpha_attack = 0.4;   // Fast: threshold rises when a new max accel is detected
+float alpha_release = 0.05; // Slow: threshold falls so one weak step doesn't collapse it
+
+unsigned long stop_timeout = 2000; // wait 2 seconds before we say the user stopped running
+
+// --- Cadence-adaptive skip period ---
+float skip_period_fraction = 0.4; // ignore steps faster than 0.4x the recent cadence
+unsigned long min_skip_period = 150;
+unsigned long max_skip_period = 500;
+
+// --- State ---
+float peak_ema = 0.0;
+float active_threshold = 20.0;
 unsigned long last_step_time = 0;
+unsigned long skip_period = 250; // starting value, adapts once steps come in
 
-float max_force_window = 0.0;
-float active_threshold = 20.0; // Initial Guess 
+const int interval_history = 4;
+unsigned long step_intervals[interval_history] = {0};
+int interval_index = 0;
+bool interval_buffer_full = false;
 
-const unsigned long window_duration = 2000;  // Recalibrate every 2 seconds (2000 ms)
-const unsigned long skip_period = 250;  //Skip double triggers within 250ms
-const float threshold_sensitivity = 0.70;    //Trigger at 0.7x the max peak
-const float baseline_floor = 20.0;            //Min m/s^2 to ignore
+// --- Debug print timing (separate from main loop rate so Serial doesn't flood) ---
+unsigned long last_debug_print = 0;
+const unsigned long debug_print_interval = 100; // ms between debug lines
 
-//   When data is sent, set sendSuccess=ESP_NOW's answer, so we can turn on the LED
+void updateSkipPeriod(unsigned long new_interval) {
+    if (new_interval == 0 || new_interval > 2000) return;
+
+    step_intervals[interval_index] = new_interval;
+    interval_index = (interval_index + 1) % interval_history;
+    if (interval_index == 0) interval_buffer_full = true;
+
+    int count = interval_buffer_full ? interval_history : interval_index;
+    if (count == 0) return;
+
+    unsigned long sum = 0;
+    for (int i = 0; i < count; i++) sum += step_intervals[i];
+    float avg_interval = (float)sum / count;
+
+    unsigned long new_skip = (unsigned long)(avg_interval * skip_period_fraction);
+    if (new_skip < min_skip_period) new_skip = min_skip_period;
+    if (new_skip > max_skip_period) new_skip = max_skip_period;
+    skip_period = new_skip;
+}
+
 void onDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
     dataSent = true;
     sendSuccess = (status == ESP_NOW_SEND_SUCCESS);
@@ -41,19 +80,19 @@ void onDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
 void setup() {
     Serial.begin(115200);
     while (!Serial);
-    
+
     pinMode(2, OUTPUT);
     digitalWrite(2, LOW);
 
-    Wire.begin(21, 22); 
+    Wire.begin(21, 22);
     if (!mpu.begin()) {
-//        Serial.println("Failed to find MPU6050 chip");
+        Serial.println("Failed to find MPU6050 chip");
         while (1) { delay(10); }
     }
 
     WiFi.mode(WIFI_STA);
     if (esp_now_init() != ESP_OK) {
-//        Serial.println("Error initializing ESP-NOW");
+        Serial.println("Error initializing ESP-NOW");
         return;
     }
 
@@ -62,57 +101,71 @@ void setup() {
     memcpy(peerInfo.peer_addr, receiverAddress, 6);
     peerInfo.channel = 0;
     peerInfo.encrypt = false;
-    if (esp_now_add_peer(&peerInfo) != ESP_OK){
-//        Serial.println("Failed to add peer");
+    if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+        Serial.println("Failed to add peer");
         return;
     }
 
-    window_start_time = millis();
-//    Serial.println("--- Active Rolling Calibration Initialized ---");
+    active_threshold = baseline_floor;
+    peak_ema = baseline_floor / threshold_sensitivity;
+
+    Serial.println("--- Step Detection Initialized ---");
+    if (DEBUG_SERIAL) {
+        Serial.println("time_ms,A_sq,active_threshold,peak_ema,skip_period,step_fired");
+    }
 }
 
 void loop() {
     unsigned long now = millis();
     sensors_event_t a, g, temp;
+    bool step_fired = false;
 
     if (mpu.getEvent(&a, &g, &temp)) {
-        //sqrt(x^2 + y^2 + z^2)
         float A_sq = sqrt(sq(a.acceleration.x) + sq(a.acceleration.y) + sq(a.acceleration.z));
 
-        //If the accel is greater than the max force, let it be the new max force
-        if (A_sq > max_force_window) {
-            max_force_window = A_sq;
+        if (now - last_step_time > stop_timeout) {
+            active_threshold = baseline_floor;
+            peak_ema = baseline_floor / threshold_sensitivity;
         }
 
-        //If it's time for a new window, then do this:
-        if (now - window_start_time >= window_duration) {
-            //Only update if the new max is bigger than the floor
-            if (max_force_window > baseline_floor) { 
-                active_threshold = max_force_window * threshold_sensitivity;
-            } else {
-                //If they stopped running, bring threshold down to baseline default
-                active_threshold = baseline_floor;
-            }
-            
-            max_force_window = 0.0; //Reset the peak at the start of a new window
-            window_start_time = now;
-        }
-
-        //To detect a step, it must be greater than the threshold, and not be in the skip period
         if (A_sq > active_threshold && (now - last_step_time > skip_period)) {
+            unsigned long interval = last_step_time == 0 ? 0 : (now - last_step_time);
             last_step_time = now;
-            
+            step_fired = true;
+
+            if (A_sq > peak_ema) {
+                peak_ema = alpha_attack * A_sq + (1 - alpha_attack) * peak_ema;
+            } else {
+                peak_ema = alpha_release * A_sq + (1 - alpha_release) * peak_ema;
+            }
+
+            active_threshold = max(peak_ema * threshold_sensitivity, baseline_floor);
+            updateSkipPeriod(interval);
+
             sensorData.step_taken = true;
             esp_now_send(receiverAddress, (uint8_t *) &sensorData, sizeof(sensorData));
-            
-            //Serial.print("Footfall! Dynamic Threshold Crossed: ");
-            //Serial.println(active_threshold);
+        }
+
+        // --- Debug print, rate-limited so it doesn't flood Serial or slow the loop ---
+        if (DEBUG_SERIAL && (now - last_debug_print >= debug_print_interval)) {
+            last_debug_print = now;
+            Serial.print(now);
+            Serial.print(",");
+            Serial.print(A_sq);
+            Serial.print(",");
+            Serial.print(active_threshold);
+            Serial.print(",");
+            Serial.print(peak_ema);
+            Serial.print(",");
+            Serial.print(skip_period);
+            Serial.print(",");
+            Serial.println(step_fired ? 1 : 0);
         }
     }
 
     if (dataSent) {
         digitalWrite(2, sendSuccess ? HIGH : LOW);
-        dataSent = false; 
+        dataSent = false;
     }
     delay(10); // 100Hz
 }
