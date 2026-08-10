@@ -5,6 +5,8 @@
 #include "LittleFS.h"
 #include <esp_now.h>
 #include <WiFi.h>
+#include "MAX30105.h"
+#include "heartRate.h"
 
 int menuIndex = 0;
 const int TOTAL_ITEMS = 3;
@@ -68,6 +70,19 @@ bool isEditingSteadyCadence = false;
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 
+// --- MAX30102 heart rate sensor ---
+MAX30105 particleSensor;
+const byte RATE_SIZE = 4;
+byte rates[RATE_SIZE];
+byte rateSpot = 0;
+long lastBeat = 0;
+
+long currentIR = 0;
+float beatsPerMinute = 0;
+int beatAvg = 0;
+bool fingerDetected = false;
+const long FINGER_THRESHOLD = 50000; // below this = no finger on sensor
+
 void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingDataRaw, int len) {
   memcpy(&incomingData, incomingDataRaw, sizeof(incomingData));
 
@@ -84,6 +99,8 @@ void setup() {
   pinMode(BUTTON_DOWN, INPUT_PULLUP);
   pinMode(BUTTON_UP, INPUT_PULLUP);
   pinMode(motorPin, OUTPUT);
+
+  Wire.begin(21, 22); // shared I2C bus for OLED + MAX30102
 
   WiFi.mode(WIFI_STA);
   if (esp_now_init() != ESP_OK) {
@@ -108,15 +125,53 @@ void setup() {
   display.println(F("Sync\nMachine"));
   display.display();
   delay(2000);
+
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+    Serial.println(F("MAX30102 was not found. Check wiring."));
+  } else {
+    particleSensor.setup();
+    particleSensor.setPulseAmplitudeRed(0x0A);
+    particleSensor.setPulseAmplitudeGreen(0); // no green LED on MAX30102, harmless call
+  }
+
   drawMenu();
 }
 
 void loop() {
   readButtons();
+  readHeartRate(); // sample every loop so data's always fresh when we log
   if (onRun) {
     runRunLogic();
   } else {
     runMenuLogic();
+  }
+}
+
+void readHeartRate() {
+  currentIR = particleSensor.getIR();
+  fingerDetected = (currentIR > FINGER_THRESHOLD);
+
+  if (!fingerDetected) {
+    // Reset so a re-placed finger doesn't get a stale/garbage first reading
+    beatsPerMinute = 0;
+    return;
+  }
+
+  if (checkForBeat(currentIR)) {
+    long delta = millis() - lastBeat;
+    lastBeat = millis();
+
+    float bpm = 60.0 / (delta / 1000.0);
+
+    if (bpm > 20 && bpm < 255) {
+      rates[rateSpot++] = (byte)bpm;
+      rateSpot %= RATE_SIZE;
+
+      beatsPerMinute = bpm;
+      beatAvg = 0;
+      for (byte x = 0; x < RATE_SIZE; x++) beatAvg += rates[x];
+      beatAvg /= RATE_SIZE;
+    }
   }
 }
 
@@ -319,7 +374,12 @@ void runRunLogic() {
   if (hasPendingStep && hasPendingBeat) {
     File f = LittleFS.open(CSV_FILE_PATH, FILE_APPEND);
     if (f) {
-      f.println(String(pendingStep) + "," + String(pendingBeat));
+      String irStr = fingerDetected ? String(currentIR) : "NaN";
+      String bpmStr = fingerDetected ? String(beatsPerMinute, 1) : "NaN";
+      String avgStr = fingerDetected ? String(beatAvg) : "NaN";
+
+      f.println(String(pendingStep) + "," + String(pendingBeat) + "," +
+                irStr + "," + bpmStr + "," + avgStr);
       f.close();
     }
     hasPendingStep = false;
@@ -378,6 +438,12 @@ void runRunLogic() {
     if(!onSteady){
       display.println(cadence, 1);
     }
+    display.print("HR: ");
+    if (fingerDetected) {
+      display.println(beatAvg);
+    } else {
+      display.println("--");
+    }
     if (isPaused) {
       display.println("[SELECT] to Resume");
     } else {
@@ -429,7 +495,7 @@ void executeSelection() {
       {
         File file = LittleFS.open(CSV_FILE_PATH, FILE_WRITE);
         if (file) {
-          file.println("Step,Beat");
+          file.println("Step,Beat,IR,BPM,AvgBPM");
           file.close();
         }
       }
