@@ -7,7 +7,7 @@
 Adafruit_MPU6050 mpu;
 
 // REPLACE WITH YOUR RECEIVER MAC ADDRESS
-uint8_t receiverAddress[] = {0x5C, 0x01, 0x3B, 0xBF, 0x3A, 0x4C};
+uint8_t receiverAddress[] = {0x68, 0x09, 0x47, 0x4b, 0xd1, 0x94};
 
 // message struct for sending "step_taken"
 typedef struct struct_message {
